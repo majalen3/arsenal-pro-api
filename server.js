@@ -102,7 +102,7 @@ const needDevice = (req, res, next) => {
   if (!d || !DEVICE_RE.test(d)) return res.status(400).json({ error: 'X-Device-Id header required (8-64 chars A-Za-z0-9_-)' });
   req.device = d; next();
 };
-app.use('/api/lines', needDevice); app.use('/api/surface-log', needDevice); app.use('/api/pattern-notes', needDevice);
+app.use('/api/me', needDevice); app.use('/api/lines', needDevice); app.use('/api/surface-log', needDevice); app.use('/api/pattern-notes', needDevice);
 const QUOTA = { lines: 300, surface: 500, notes: 200 };
 
 // ---- validation helpers
@@ -200,6 +200,12 @@ app.post('/api/pattern-notes', wrap(async (req, res) => {
 app.get('/api/pattern-notes', wrap(async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM pattern_notes WHERE device_id=$1 ORDER BY id DESC LIMIT 50', [req.device]);
   res.json(rows.map((r) => ({ id: r.id, lane: r.lane, oil: r.oil, adjustment: r.adjustment, createdAt: r.created_at })));
+}));
+
+app.delete('/api/me', wrap(async (req, res) => {
+  const out = {};
+  for (const t of ['lines', 'surface_log', 'pattern_notes']) out[t] = (await pool.query(`DELETE FROM ${t} WHERE device_id=$1`, [req.device])).rowCount;
+  res.json({ deleted: out });
 }));
 
 app.use((req, res) => res.status(404).json({ error: 'not found' }));

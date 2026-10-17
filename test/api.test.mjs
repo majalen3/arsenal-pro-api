@@ -104,3 +104,11 @@ test('rate limit: burst from one device yields 429, health exempt', async () => 
   assert.ok(codes.includes(429), 'no 429 in burst of 150');
   assert.equal((await call('GET', '/api/health')).status, 200);
 });
+test('DELETE /api/me wipes only this device', async () => {
+  const a = dev(), b = dev();
+  await call('POST', '/api/lines', { device: a, body: line() }); await call('POST', '/api/lines', { device: b, body: line() });
+  await call('POST', '/api/pattern-notes', { device: a, body: { lane: '1', oil: 'x', adjustment: 'y' } });
+  const r = await call('DELETE', '/api/me', { device: a }); assert.equal(r.json.deleted.lines, 1); assert.equal(r.json.deleted.pattern_notes, 1);
+  assert.equal((await call('GET', '/api/lines?ballId=super-nova', { device: b })).json.length, 1);
+  assert.equal((await call('DELETE', '/api/me')).status, 400);
+});
