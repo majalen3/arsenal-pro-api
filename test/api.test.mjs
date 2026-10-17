@@ -121,3 +121,10 @@ test('GET /api/me exports this device only', async () => {
   await call('POST', '/api/lines', { device: a, body: line() }); await call('POST', '/api/lines', { device: b, body: line({ name: 'other' }) });
   const r = await call('GET', '/api/me', { device: a }); assert.equal(r.status, 200); assert.equal(r.json.lines.length, 1); assert.equal(r.json.lines[0].name, 'L1');
 });
+test('non-JSON content types are rejected, not 500', async () => {
+  const d = dev();
+  const r = await fetch(BASE + '/api/lines', { method: 'POST', headers: { 'X-Device-Id': d, 'Content-Type': 'text/plain' }, body: 'hello' });
+  assert.equal(r.status, 400);
+  const r2 = await fetch(BASE + '/api/lines', { method: 'PUT', headers: { 'X-Device-Id': d } });
+  assert.ok([404, 405].includes(r2.status));
+});
