@@ -116,3 +116,8 @@ test('DELETE /api/me wipes only this device', async () => {
 });
 
 after(async () => { for (const d of used) { try { await fetch(BASE + '/api/me', { method: 'DELETE', headers: { 'X-Device-Id': d } }); } catch (e) {} } });
+test('GET /api/me exports this device only', async () => {
+  const a = dev(), b = dev();
+  await call('POST', '/api/lines', { device: a, body: line() }); await call('POST', '/api/lines', { device: b, body: line({ name: 'other' }) });
+  const r = await call('GET', '/api/me', { device: a }); assert.equal(r.status, 200); assert.equal(r.json.lines.length, 1); assert.equal(r.json.lines[0].name, 'L1');
+});

@@ -73,6 +73,7 @@ app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
+app.use((req, res, next) => { const t0 = Date.now(); res.on('finish', () => { if (req.path !== '/api/health') console.log(JSON.stringify({ m: req.method, p: req.path, s: res.statusCode, ms: Date.now() - t0 })); }); next(); });
 app.use(express.json({ limit: '20kb' }));
 
 // ---- per-device identity + rate limiting (in-memory; fine for a single free instance)
@@ -202,6 +203,13 @@ app.get('/api/pattern-notes', wrap(async (req, res) => {
   res.json(rows.map((r) => ({ id: r.id, lane: r.lane, oil: r.oil, adjustment: r.adjustment, createdAt: r.created_at })));
 }));
 
+app.get('/api/me', wrap(async (req, res) => {
+  const [l, sl, n] = await Promise.all([
+    pool.query('SELECT * FROM lines WHERE device_id=$1 ORDER BY id', [req.device]),
+    pool.query("SELECT ball_id, to_char(date,'YYYY-MM-DD') AS date, finish FROM surface_log WHERE device_id=$1 ORDER BY id", [req.device]),
+    pool.query('SELECT lane, oil, adjustment FROM pattern_notes WHERE device_id=$1 ORDER BY id', [req.device])]);
+  res.json({ exportedAt: new Date().toISOString(), lines: l.rows.map(lineOut), surfaceLog: sl.rows.map((r) => ({ ballId: r.ball_id, date: r.date, finish: r.finish })), patternNotes: n.rows });
+}));
 app.delete('/api/me', wrap(async (req, res) => {
   const out = {};
   for (const t of ['lines', 'surface_log', 'pattern_notes']) out[t] = (await pool.query(`DELETE FROM ${t} WHERE device_id=$1`, [req.device])).rowCount;
@@ -215,5 +223,6 @@ app.use((err, req, res, next) => {
   console.error(err); res.status(500).json({ error: 'server error' });
 });
 
-app.listen(PORT, '0.0.0.0', () => console.log('listening on', PORT));
+const server = app.listen(PORT, '0.0.0.0', () => console.log('listening on', PORT));
+process.on('SIGTERM', () => { console.log('SIGTERM, closing'); server.close(() => pool.end().finally(() => process.exit(0))); setTimeout(() => process.exit(0), 8000).unref(); });
 initDb();
