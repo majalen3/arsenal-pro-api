@@ -2,9 +2,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { after } from 'node:test';
 const BASE = process.env.BASE || 'http://localhost:8787';
 const ORIGIN = 'https://majalen3.github.io';
-const dev = () => 'T-' + crypto.randomUUID();
+const used = new Set();
+const dev = () => { const d = 'T-' + crypto.randomUUID(); used.add(d); return d; };
 const call = async (method, path, { body, device, raw, headers = {} } = {}) => {
   const h = { Origin: ORIGIN, ...headers };
   if (device) h['X-Device-Id'] = device;
@@ -112,3 +114,5 @@ test('DELETE /api/me wipes only this device', async () => {
   assert.equal((await call('GET', '/api/lines?ballId=super-nova', { device: b })).json.length, 1);
   assert.equal((await call('DELETE', '/api/me')).status, 400);
 });
+
+after(async () => { for (const d of used) { try { await fetch(BASE + '/api/me', { method: 'DELETE', headers: { 'X-Device-Id': d } }); } catch (e) {} } });
