@@ -44,6 +44,13 @@ async function initDb() {
         CREATE UNIQUE INDEX IF NOT EXISTS lines_dev_ball_name ON lines (device_id, ball_id, name);
         CREATE INDEX IF NOT EXISTS surface_dev ON surface_log (device_id, ball_id);
         CREATE INDEX IF NOT EXISTS notes_dev ON pattern_notes (device_id, id);
+        CREATE TABLE IF NOT EXISTS events (
+          device_id TEXT NOT NULL, id TEXT NOT NULL, seq BIGSERIAL, ts BIGINT NOT NULL,
+          type TEXT NOT NULL, entity TEXT, entity_id TEXT, schema_v INT, data JSONB,
+          src TEXT, prov JSONB, import_id TEXT, created_at TIMESTAMPTZ DEFAULT now(),
+          PRIMARY KEY (device_id, id)
+        );
+        CREATE INDEX IF NOT EXISTS events_dev_seq ON events (device_id, seq);
       `);
       dbReady = true;
       console.log('database ready');
@@ -67,7 +74,7 @@ app.use((req, res, next) => {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, X-Device-Id',
-    'Access-Control-Expose-Headers': 'Retry-After',
+    'Access-Control-Expose-Headers': 'Retry-After, X-Next-Before',
     'Access-Control-Max-Age': '86400',
   });
   if (req.method === 'OPTIONS') return res.sendStatus(204);
@@ -103,8 +110,9 @@ const needDevice = (req, res, next) => {
   if (!d || !DEVICE_RE.test(d)) return res.status(400).json({ error: 'X-Device-Id header required (8-64 chars A-Za-z0-9_-)' });
   req.device = d; next();
 };
-app.use('/api/me', needDevice); app.use('/api/lines', needDevice); app.use('/api/surface-log', needDevice); app.use('/api/pattern-notes', needDevice);
-const QUOTA = { lines: 300, surface: 500, notes: 200 };
+app.use('/api/me', needDevice); app.use('/api/lines', needDevice); app.use('/api/surface-log', needDevice); app.use('/api/pattern-notes', needDevice); app.use('/api/events', needDevice);
+const QUOTA = { lines: 300, surface: 500, notes: 200, events: +(process.env.EVENT_QUOTA || 5000) };
+const EVENT_BATCH_MAX = 500, EVENT_DATA_MAX = 8000;
 
 // ---- validation helpers
 const str = (v, max, { required = false } = {}) => {
@@ -199,20 +207,83 @@ app.post('/api/pattern-notes', wrap(async (req, res) => {
   res.status(201).json({ id: r.id, lane: r.lane, oil: r.oil, adjustment: r.adjustment, createdAt: r.created_at });
 }));
 app.get('/api/pattern-notes', wrap(async (req, res) => {
-  const { rows } = await pool.query('SELECT * FROM pattern_notes WHERE device_id=$1 ORDER BY id DESC LIMIT 50', [req.device]);
+  // Paged: ?before=<id>&limit=<1..200>. With no params the response is the newest 50, as before. Next page: X-Next-Before header.
+  const limit = req.query.limit === undefined ? 50 : num(req.query.limit, 1, 200), before = req.query.before === undefined ? null : num(req.query.before, 1, 2147483647);
+  if (Number.isNaN(limit) || limit === null || Number.isNaN(before) || !Number.isInteger(limit) || (before !== null && !Number.isInteger(before))) return bad(res, 'limit must be 1-200 and before a note id');
+  const { rows } = await pool.query('SELECT * FROM pattern_notes WHERE device_id=$1 AND ($2::int IS NULL OR id < $2) ORDER BY id DESC LIMIT $3', [req.device, before, limit + 1]);
+  const more = rows.length > limit; if (more) rows.pop();
+  if (more) res.set('X-Next-Before', String(rows[rows.length - 1].id));
   res.json(rows.map((r) => ({ id: r.id, lane: r.lane, oil: r.oil, adjustment: r.adjustment, createdAt: r.created_at })));
 }));
 
+// ---- v2 event log sync (additive; v1 endpoints unchanged). Idempotent by (device_id, id).
+const TYPE_RE = /^[a-zA-Z]+\.[a-zA-Z]+$/;
+function eventIn(e) {
+  if (!e || typeof e !== 'object' || Array.isArray(e)) return null;
+  if (typeof e.id !== 'string' || !e.id || e.id.length > 80 || e.id.includes('\u0000')) return null;
+  if (typeof e.type !== 'string' || e.type.length > 60 || !TYPE_RE.test(e.type)) return null;
+  if (!Number.isSafeInteger(e.ts) || e.ts < 0) return null;
+  const opt = (v, max) => (v === undefined || v === null ? null : typeof v === 'string' && v.length <= max && !v.includes('\u0000') ? v : undefined);
+  const entityId = opt(e.entityId, 200), src = opt(e.deviceId, 64), importId = opt(e.importId, 80);
+  if (entityId === undefined || src === undefined || importId === undefined) return null;
+  const obj = (v) => (v === undefined || v === null ? null : typeof v === 'object' && !Array.isArray(v) ? v : undefined);
+  const data = obj(e.data), prov = obj(e.prov);
+  if (data === undefined || prov === undefined) return null;
+  const dj = JSON.stringify(data); if (dj.length > EVENT_DATA_MAX || dj.includes('\\u0000')) return null;
+  const sv = e.schemaV === undefined || e.schemaV === null ? null : Number.isInteger(e.schemaV) && e.schemaV >= 0 && e.schemaV < 1000 ? e.schemaV : undefined;
+  if (sv === undefined) return null;
+  return { id: e.id, ts: e.ts, type: e.type, entity: e.type.split('.')[0], entityId, sv, data: dj, src, prov: prov === null ? null : JSON.stringify(prov), importId };
+}
+const eventOut = (r) => ({ id: r.id, seq: Number(r.seq), ts: Number(r.ts), type: r.type, entity: r.entity, entityId: r.entity_id, schemaV: r.schema_v, data: r.data, deviceId: r.src, prov: r.prov || undefined, importId: r.import_id || undefined });
+app.post('/api/events', wrap(async (req, res) => {
+  const list = req.body && req.body.events;
+  if (!Array.isArray(list) || !list.length) return bad(res, 'body must be {events:[...]} with at least one event');
+  if (list.length > EVENT_BATCH_MAX) return bad(res, `at most ${EVENT_BATCH_MAX} events per batch`);
+  const evs = list.map(eventIn); const i = evs.indexOf(null);
+  if (i >= 0) return bad(res, `event ${i} is invalid (id <=80 chars, type "entity.verb", integer ts, object data <=${EVENT_DATA_MAX} chars)`);
+  const ids = [...new Set(evs.map((e) => e.id))];
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [req.device]);
+    const known = (await c.query('SELECT id FROM events WHERE device_id=$1 AND id = ANY($2)', [req.device, ids])).rows.map((r) => r.id);
+    const fresh = ids.length - known.length;
+    const stored = Number((await c.query('SELECT count(*) AS n FROM events WHERE device_id=$1', [req.device])).rows[0].n);
+    if (fresh && stored + fresh > QUOTA.events) {
+      await c.query('ROLLBACK');
+      return res.status(429).json({ error: `event quota reached: this backup code can store ${QUOTA.events} events on the server (${stored} stored). Everything stays on your phone; download a backup from More to keep a copy.`, quota: QUOTA.events, stored });
+    }
+    let accepted = 0;
+    for (const e of evs) {
+      const r = await c.query('INSERT INTO events (device_id,id,ts,type,entity,entity_id,schema_v,data,src,prov,import_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10::jsonb,$11) ON CONFLICT (device_id,id) DO NOTHING',
+        [req.device, e.id, e.ts, e.type, e.entity, e.entityId, e.sv, e.data, e.src, e.prov, e.importId]);
+      accepted += r.rowCount;
+    }
+    const cur = (await c.query('SELECT COALESCE(max(seq),0) AS s FROM events WHERE device_id=$1', [req.device])).rows[0].s;
+    await c.query('COMMIT');
+    res.status(200).json({ accepted, duplicates: evs.length - accepted, cursor: String(cur), stored: stored + accepted, quota: QUOTA.events });
+  } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
+}));
+app.get('/api/events', wrap(async (req, res) => {
+  const after = req.query.after === undefined ? 0 : /^\d{1,18}$/.test(String(req.query.after)) ? String(req.query.after) : null;
+  const limit = req.query.limit === undefined ? 500 : num(req.query.limit, 1, 500);
+  if (after === null || Number.isNaN(limit) || !Number.isInteger(limit)) return bad(res, 'after must be a cursor from a previous response and limit 1-500');
+  const { rows } = await pool.query('SELECT * FROM events WHERE device_id=$1 AND seq > $2 ORDER BY seq LIMIT $3', [req.device, after, limit + 1]);
+  const more = rows.length > limit; if (more) rows.pop();
+  res.json({ events: rows.map(eventOut), cursor: rows.length ? String(rows[rows.length - 1].seq) : String(after), more });
+}));
+
 app.get('/api/me', wrap(async (req, res) => {
-  const [l, sl, n] = await Promise.all([
+  const [l, sl, n, ev] = await Promise.all([
     pool.query('SELECT * FROM lines WHERE device_id=$1 ORDER BY id', [req.device]),
     pool.query("SELECT ball_id, to_char(date,'YYYY-MM-DD') AS date, finish FROM surface_log WHERE device_id=$1 ORDER BY id", [req.device]),
-    pool.query('SELECT lane, oil, adjustment FROM pattern_notes WHERE device_id=$1 ORDER BY id', [req.device])]);
-  res.json({ exportedAt: new Date().toISOString(), lines: l.rows.map(lineOut), surfaceLog: sl.rows.map((r) => ({ ballId: r.ball_id, date: r.date, finish: r.finish })), patternNotes: n.rows });
+    pool.query('SELECT lane, oil, adjustment FROM pattern_notes WHERE device_id=$1 ORDER BY id', [req.device]),
+    pool.query('SELECT * FROM events WHERE device_id=$1 ORDER BY seq', [req.device])]);
+  res.json({ exportedAt: new Date().toISOString(), lines: l.rows.map(lineOut), surfaceLog: sl.rows.map((r) => ({ ballId: r.ball_id, date: r.date, finish: r.finish })), patternNotes: n.rows, events: ev.rows.map(eventOut) });
 }));
 app.delete('/api/me', wrap(async (req, res) => {
   const out = {};
-  for (const t of ['lines', 'surface_log', 'pattern_notes']) out[t] = (await pool.query(`DELETE FROM ${t} WHERE device_id=$1`, [req.device])).rowCount;
+  for (const t of ['lines', 'surface_log', 'pattern_notes', 'events']) out[t] = (await pool.query(`DELETE FROM ${t} WHERE device_id=$1`, [req.device])).rowCount;
   res.json({ deleted: out });
 }));
 

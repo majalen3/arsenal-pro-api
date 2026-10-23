@@ -16,8 +16,11 @@ Small Node/Express + Postgres API for the Urbanek Honey Badgers Arsenal Pro bowl
 - `POST /api/surface-log` `{ballId,date:"YYYY-MM-DD",finish}`
 - `GET /api/surface-log?ballId=...`
 - `POST /api/pattern-notes` `{lane,oil,adjustment}`
-- `GET /api/pattern-notes`
-- `DELETE /api/me` — wipes all rows for this device
+- `GET /api/pattern-notes[?limit=1-200&before=<id>]`: newest first, 50 by default; `X-Next-Before` header when there are more
+- `POST /api/events` `{events:[envelope…]}` (v2 sync, ≤ 500 events and 20 kB per batch). Idempotent per (device, event id); returns `{accepted, duplicates, cursor, stored, quota}`. Per-device quota `EVENT_QUOTA` (default 5000) → `429 {error, quota, stored}` without Retry-After
+- `GET /api/events?after=<cursor>&limit=1-500` → `{events, cursor, more}` in server order
+- `GET /api/me`: exports lines, surface log, pattern notes **and events** for this device
+- `DELETE /api/me`: wipes all rows for this device, including events
 
 ## Tests
 `BASE=http://localhost:8787 npm test` (node:test; needs a running server + Postgres; cleans up its own device ids).
