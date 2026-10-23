@@ -29,7 +29,7 @@ test('POST /api/events is idempotent; GET pages by cursor in server order', asyn
   assert.equal(p2.json.events.length, 3); assert.equal(p2.json.more, false);
   const got = [...p1.json.events, ...p2.json.events];
   assert.deepEqual(got.map((e) => e.id), batch.map((e) => e.id));
-  assert.deepEqual(got[0].data, batch[0].data); assert.equal(got[0].ts, batch[0].ts); assert.equal(got[0].deviceId, 'phoneA'); assert.equal(got[0].entityId, 'super-nova|A');
+  assert.deepEqual(got[0].data, batch[0].data); assert.equal(got[0].ts, batch[0].ts); assert.equal(got[0].deviceId, 'phoneA'); assert.equal(got[0].seq, batch[0].seq, 'phone seq kept'); assert.ok(/^\d+$/.test(got[0].serverSeq)); assert.equal(got[0].entityId, 'super-nova|A');
   const p3 = await call('GET', '/api/events?after=' + p2.json.cursor, { device: d }); assert.equal(p3.json.events.length, 0); assert.equal(p3.json.cursor, p2.json.cursor);
 });
 test('prov and importId round-trip; device isolation', async () => {
@@ -45,7 +45,7 @@ test('validation: malformed events -> 400, never 500; nothing stored from a bad 
   const d = dev();
   const bad = [{}, { events: [] }, { events: 'x' }, { events: [ev({ id: '' })] }, { events: [ev({ id: 'x'.repeat(81) })] }, { events: [ev({ type: 'nodot' })] }, { events: [ev({ ts: 'now' })] },
     { events: [ev({ ts: 1.5 })] }, { events: [ev({ data: [1] })] }, { events: [ev({ data: 'str' })] }, { events: [ev({ entityId: { a: 1 } })] }, { events: [ev({ prov: 'x' })] },
-    { events: [ev({ id: 'nul\u0000' })] }, { events: [ev({ data: { s: 'nul\u0000' } })] }, { events: [ev({ schemaV: -1 })] }, { events: [ev(), null] }, { events: [ev({ data: { s: 'x'.repeat(9000) } })] }];
+    { events: [ev({ id: 'nul\u0000' })] }, { events: [ev({ data: { s: 'nul\u0000' } })] }, { events: [ev({ schemaV: -1 })] }, { events: [ev({ seq: 'x' })] }, { events: [ev(), null] }, { events: [ev({ data: { s: 'x'.repeat(9000) } })] }];
   for (const b of bad) { const r = await call('POST', '/api/events', { device: d, body: b }); assert.equal(r.status, 400, JSON.stringify(b).slice(0, 90)); }
   for (const raw of ['{bad', 'null', '[]']) assert.equal((await call('POST', '/api/events', { device: d, raw })).status, 400);
   assert.equal((await call('POST', '/api/events', { body: { events: [ev()] } })).status, 400, 'device header required');

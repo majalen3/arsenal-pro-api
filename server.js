@@ -51,6 +51,7 @@ async function initDb() {
           PRIMARY KEY (device_id, id)
         );
         CREATE INDEX IF NOT EXISTS events_dev_seq ON events (device_id, seq);
+        ALTER TABLE events ADD COLUMN IF NOT EXISTS src_seq BIGINT;
       `);
       dbReady = true;
       console.log('database ready');
@@ -232,9 +233,12 @@ function eventIn(e) {
   const dj = JSON.stringify(data); if (dj.length > EVENT_DATA_MAX || dj.includes('\\u0000')) return null;
   const sv = e.schemaV === undefined || e.schemaV === null ? null : Number.isInteger(e.schemaV) && e.schemaV >= 0 && e.schemaV < 1000 ? e.schemaV : undefined;
   if (sv === undefined) return null;
-  return { id: e.id, ts: e.ts, type: e.type, entity: e.type.split('.')[0], entityId, sv, data: dj, src, prov: prov === null ? null : JSON.stringify(prov), importId };
+  const srcSeq = e.seq === undefined || e.seq === null ? null : Number.isSafeInteger(e.seq) && e.seq >= 0 ? e.seq : undefined;
+  if (srcSeq === undefined) return null;
+  return { id: e.id, srcSeq, ts: e.ts, type: e.type, entity: e.type.split('.')[0], entityId, sv, data: dj, src, prov: prov === null ? null : JSON.stringify(prov), importId };
 }
-const eventOut = (r) => ({ id: r.id, seq: Number(r.seq), ts: Number(r.ts), type: r.type, entity: r.entity, entityId: r.entity_id, schemaV: r.schema_v, data: r.data, deviceId: r.src, prov: r.prov || undefined, importId: r.import_id || undefined });
+// seq = the writing phone's own sequence (part of the envelope, used to order same-ms events); serverSeq = cursor order.
+const eventOut = (r) => ({ id: r.id, seq: r.src_seq === null ? undefined : Number(r.src_seq), serverSeq: String(r.seq), ts: Number(r.ts), type: r.type, entity: r.entity, entityId: r.entity_id, schemaV: r.schema_v, data: r.data, deviceId: r.src, prov: r.prov || undefined, importId: r.import_id || undefined });
 app.post('/api/events', wrap(async (req, res) => {
   const list = req.body && req.body.events;
   if (!Array.isArray(list) || !list.length) return bad(res, 'body must be {events:[...]} with at least one event');
@@ -255,8 +259,8 @@ app.post('/api/events', wrap(async (req, res) => {
     }
     let accepted = 0;
     for (const e of evs) {
-      const r = await c.query('INSERT INTO events (device_id,id,ts,type,entity,entity_id,schema_v,data,src,prov,import_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10::jsonb,$11) ON CONFLICT (device_id,id) DO NOTHING',
-        [req.device, e.id, e.ts, e.type, e.entity, e.entityId, e.sv, e.data, e.src, e.prov, e.importId]);
+      const r = await c.query('INSERT INTO events (device_id,id,ts,type,entity,entity_id,schema_v,data,src,prov,import_id,src_seq) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10::jsonb,$11,$12) ON CONFLICT (device_id,id) DO NOTHING',
+        [req.device, e.id, e.ts, e.type, e.entity, e.entityId, e.sv, e.data, e.src, e.prov, e.importId, e.srcSeq]);
       accepted += r.rowCount;
     }
     const cur = (await c.query('SELECT COALESCE(max(seq),0) AS s FROM events WHERE device_id=$1', [req.device])).rows[0].s;
