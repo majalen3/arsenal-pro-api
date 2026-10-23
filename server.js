@@ -1,6 +1,8 @@
 'use strict';
 const express = require('express');
 const { Pool } = require('pg');
+const { parseSpecPage } = require('./lib/specparse');
+const SF = require('./lib/specfetch');
 
 const PORT = process.env.PORT || 3000;
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -52,6 +54,8 @@ async function initDb() {
         );
         CREATE INDEX IF NOT EXISTS events_dev_seq ON events (device_id, seq);
         ALTER TABLE events ADD COLUMN IF NOT EXISTS src_seq BIGINT;
+        -- Global cache of PUBLIC manufacturer spec pages. No device id, no user data (DECISIONS #24), so /api/me has nothing to export/delete here.
+        CREATE TABLE IF NOT EXISTS spec_cache (key TEXT PRIMARY KEY, body JSONB NOT NULL, fetched_at TIMESTAMPTZ NOT NULL DEFAULT now());
       `);
       dbReady = true;
       console.log('database ready');
@@ -94,7 +98,7 @@ function hit(key, limit, windowMs) {
   return b.n <= limit ? 0 : Math.ceil((b.t0 + windowMs - now) / 1000);
 }
 setInterval(() => { const now = Date.now(); for (const [k, b] of buckets) if (now - b.t0 > 120000) buckets.delete(k); }, 60000).unref();
-const LIMITS = { ip: +(process.env.RL_IP || 600), device: +(process.env.RL_DEVICE || 120), write: +(process.env.RL_WRITE || 40) };
+const LIMITS = { ip: +(process.env.RL_IP || 600), device: +(process.env.RL_DEVICE || 120), write: +(process.env.RL_WRITE || 40), lookup: +(process.env.RL_LOOKUP || 30) };
 app.use('/api', (req, res, next) => {
   if (req.path === '/health') return next();
   let wait = hit('ip:' + req.ip, LIMITS.ip, 60000);
@@ -290,6 +294,61 @@ app.delete('/api/me', wrap(async (req, res) => {
   for (const t of ['lines', 'surface_log', 'pattern_notes', 'events']) out[t] = (await pool.query(`DELETE FROM ${t} WHERE device_id=$1`, [req.device])).rowCount;
   res.json({ deleted: out });
 }));
+
+// ---- ball spec lookup on the maker's own site (allowlisted hosts only; see lib/specfetch.js). Proposal only: the app
+// shows every field with its source and the user confirms before anything is saved. Missing fields are simply absent.
+const LOOKUP_TTL = { found: 30 * 86400e3, other: 86400e3 };
+async function cacheGet(key) {
+  if (!dbReady) return null;
+  try { const r = await pool.query('SELECT body, fetched_at FROM spec_cache WHERE key=$1', [key]); if (!r.rows.length) return null;
+    const ttl = r.rows[0].body.status === 'found' ? LOOKUP_TTL.found : LOOKUP_TTL.other;
+    return Date.now() - new Date(r.rows[0].fetched_at).getTime() < ttl ? r.rows[0].body : null; } catch (e) { return null; }
+}
+async function cachePut(key, body) {
+  if (!dbReady) return;
+  try { await pool.query('INSERT INTO spec_cache (key, body, fetched_at) VALUES ($1,$2,now()) ON CONFLICT (key) DO UPDATE SET body=EXCLUDED.body, fetched_at=now()', [key, body]); } catch (e) { console.error('spec_cache', e.message); }
+}
+async function fetchSpecPage(url, brand) {
+  const r = await SF.guardedFetch(url);
+  if (r.status === 'blocked' || r.status === 'busy') return { status: r.status, why: r.why, retryAfter: r.retryAfter, brand: brand && brand.key };
+  if (!r.ok) return { status: 'not-found', why: `maker page answered ${r.status}`, brand: brand && brand.key, tried: url };
+  const p = parseSpecPage(r.body);
+  const base = { brand: brand && brand.key, source: { url: r.url, host: new URL(r.url).hostname, fetchedAt: new Date().toISOString(), title: p.title } };
+  if (!Object.keys(p.fields).length && !Object.keys(p.weights).length) return { status: 'not-found', why: 'no spec table found on the maker page', ...base };
+  return { status: 'found', ...base, fields: p.fields, weights: p.weights, headlineWeight: p.headlineWeight };
+}
+app.get('/api/spec-lookup', async (req, res) => {
+  const t0 = Date.now();
+  const wait = hit('lk:' + req.ip, LIMITS.lookup, 600000);
+  if (wait) { res.set('Retry-After', String(wait)); return res.status(429).json({ error: 'too many lookups', retryAfter: wait }); }
+  const url = str(req.query.url, 300), brandQ = str(req.query.brand, 40), name = str(req.query.name, 60);
+  if (url === null || brandQ === null || name === null) return bad(res, 'brand (<=40), name (<=60) or url (<=300) must be short strings');
+  if (!url && !(brandQ && name)) return bad(res, 'brand and name, or url, required');
+  const send = (body, cached) => res.json({ ...body, cached: !!cached, ms: Date.now() - t0 });
+  try {
+    if (url) {
+      const c = SF.checkUrl(url); if (!c.ok) return bad(res, 'url rejected: ' + c.why);
+      const key = 'u:' + c.url.href, hitc = await cacheGet(key); if (hitc) return send(hitc, true);
+      const out = await fetchSpecPage(c.url.href, SF.brandForHost(c.url.hostname));
+      if (out.status === 'found' || out.status === 'not-found') await cachePut(key, out);
+      return send(out);
+    }
+    const brand = SF.brandOf(brandQ);
+    if (!brand) return send({ status: 'unsupported', why: 'No lookup route for this brand yet. Pick from the catalog or type the specs in.', brand: brandQ });
+    if (brand.strategy === 'unsupported') return send({ status: 'unsupported', why: brand.why, brand: brand.key });
+    const qt = SF.tokens(name); if (!qt.length) return bad(res, 'name has no searchable words');
+    const key = 'q:' + brand.key + '|' + qt.join(' '), hitc = await cacheGet(key); if (hitc) return send(hitc, true);
+    const cands = await SF.discover(brand, name);
+    let out;
+    if (!cands.length) out = { status: 'not-found', why: "no product on the maker's site matches that name", brand: brand.key };
+    else if (cands[0].template || cands[0].score === 1 || (cands[0].score >= 0.75 && (!cands[1] || cands[0].score - cands[1].score >= 0.15))) {
+      out = await fetchSpecPage(cands[0].url, brand);
+      if (out.status !== 'found' && cands[0].template) out.why = "no page for that name on the maker's site (try the exact model name)";
+    } else out = { status: 'candidates', brand: brand.key, candidates: cands.map(({ url: u, label, score }) => ({ url: u, label, score: Math.round(score * 100) / 100 })) };
+    if (out.status === 'found' || out.status === 'not-found' || out.status === 'candidates') await cachePut(key, out);
+    return send(out);
+  } catch (e) { console.error('spec-lookup', e.message); return res.status(502).json({ status: 'error', error: 'lookup failed', why: e.code === 'TOO_LARGE' ? 'maker page too large' : 'maker site did not answer in time' }); }
+});
 
 app.use((req, res) => res.status(404).json({ error: 'not found' }));
 app.use((err, req, res, next) => {

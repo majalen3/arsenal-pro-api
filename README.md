@@ -22,5 +22,16 @@ Small Node/Express + Postgres API for the Urbanek Honey Badgers Arsenal Pro bowl
 - `GET /api/me`: exports lines, surface log, pattern notes **and events** for this device
 - `DELETE /api/me`: wipes all rows for this device, including events
 
+### Ball spec lookup (no device id needed; 30 lookups / 10 min / IP)
+
+`GET /api/spec-lookup?brand=Radical&name=Rattler%20Big%20Bite` or `?url=<maker product page>`. The API fetches **only** the
+manufacturer hosts in `lib/specfetch.js` (Storm site incl. Roto Grip/900 Global, Brunswick, Radical, DV8, Hammer, Ebonite, Track,
+Columbia 300), https only, every redirect re-checked, public IPs only, 1.5 MB / 8 s caps, robots.txt + Crawl-delay honoured, UA
+`ArsenalProSpecLookup/1.0`. Motiv is `unsupported` (their site answers 403). `lib/specparse.js` returns only labelled values printed
+on the page (`{v, raw, label}`, `derived:true` when cover type/symmetry come from the printed cover/core name) and per-weight
+RG/Diff tables. Response `status`: `found` (with `source.url`, `source.fetchedAt`), `candidates` (pick one, then call with `?url=`),
+`not-found`, `unsupported`, `blocked`, `busy`; 400 on bad input or an off-list URL. Results are cached in `spec_cache` (30 days found,
+1 day otherwise). **`spec_cache` is global public maker data with no device id**, so `/api/me` has nothing of the user's in it.
+
 ## Tests
 `BASE=http://localhost:8787 npm test` (node:test; needs a running server + Postgres; cleans up its own device ids).

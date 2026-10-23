@@ -128,3 +128,22 @@ test('non-JSON content types are rejected, not 500', async () => {
   const r2 = await fetch(BASE + '/api/lines', { method: 'PUT', headers: { 'X-Device-Id': d } });
   assert.ok([404, 405].includes(r2.status));
 });
+
+test('spec-lookup: validation and allowlist (no outbound fetches)', async () => {
+  assert.equal((await call('GET', '/api/spec-lookup')).status, 400);
+  assert.equal((await call('GET', '/api/spec-lookup?brand=Storm')).status, 400);
+  assert.equal((await call('GET', '/api/spec-lookup?brand=Storm&name=' + 'x'.repeat(61))).status, 400);
+  assert.equal((await call('GET', '/api/spec-lookup?brand=Storm&name=a&name=b')).status, 400, 'array params rejected');
+  const off = await call('GET', '/api/spec-lookup?url=' + encodeURIComponent('https://evil.example.com/x'));
+  assert.equal(off.status, 400); assert.match(off.json.error, /allowlist/);
+  assert.equal((await call('GET', '/api/spec-lookup?url=' + encodeURIComponent('http://radicalbowling.com/'))).status, 400);
+  assert.equal((await call('GET', '/api/spec-lookup?url=' + encodeURIComponent('https://169.254.169.254/latest/meta-data'))).status, 400);
+  const mo = await call('GET', '/api/spec-lookup?brand=Motiv&name=Jackal');
+  assert.equal(mo.status, 200); assert.equal(mo.json.status, 'unsupported');
+  const un = await call('GET', '/api/spec-lookup?brand=Acme&name=Rocket');
+  assert.equal(un.status, 200); assert.equal(un.json.status, 'unsupported');
+});
+test('spec-lookup: CORS simple GET without a device id', async () => {
+  const r = await fetch(BASE + '/api/spec-lookup?brand=Acme&name=x', { headers: { Origin: ORIGIN } });
+  assert.equal(r.status, 200); assert.ok(r.headers.get('access-control-allow-origin'));
+});
