@@ -291,40 +291,6 @@ app.delete('/api/me', wrap(async (req, res) => {
   res.json({ deleted: out });
 }));
 
-// ---- TEMPORARY one-shot cleanup (2026-10-23, owner-approved). Removes ONLY lines 1003 and 1004, written by an
-// early browser test run before tests were blocked from production. Off unless ADMIN_TOKEN (>= 32 chars) is set.
-// This block is deleted in the next commit.
-const CLEAN_IDS = [1003, 1004];
-const adminOk = (req) => {
-  const t = process.env.ADMIN_TOKEN || '', g = String(req.get('x-admin-token') || '');
-  if (t.length < 32 || g.length !== t.length) return false;
-  return require('crypto').timingSafeEqual(Buffer.from(t), Buffer.from(g));
-};
-app.get('/api/admin/test-lines', wrap(async (req, res) => {
-  if (!adminOk(req)) return res.status(404).json({ error: 'not found' });
-  const r = await pool.query(`SELECT id, ball_id, name, note, release, aim, speed, rev, oil, finish, pattern, created_at::text AS created_at, updated_at::text AS updated_at,
-      left(device_id, 4) AS dev4, (SELECT count(*) FROM lines l2 WHERE l2.device_id = lines.device_id)::int AS device_rows
-    FROM lines WHERE id = ANY($1::int[]) ORDER BY id`, [CLEAN_IDS]);
-  res.json({ rows: r.rows });
-}));
-app.post('/api/admin/test-lines/delete', wrap(async (req, res) => {
-  if (!adminOk(req)) return res.status(404).json({ error: 'not found' });
-  const c = req.body && req.body.confirm;
-  if (!Array.isArray(c) || c.length !== 2 || !c.every((x) => x && CLEAN_IDS.includes(x.id) && typeof x.name === 'string' && typeof x.createdAt === 'string') || c[0].id === c[1].id) return bad(res, 'confirm must list exactly ids 1003 and 1004 with name and createdAt');
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const out = [];
-    for (const x of c) {
-      const r = await client.query('DELETE FROM lines WHERE id = $1 AND name = $2 AND created_at::text = $3 RETURNING id, name, created_at::text AS created_at', [x.id, x.name, x.createdAt]);
-      out.push(...r.rows);
-    }
-    if (out.length !== 2) { await client.query('ROLLBACK'); return res.status(409).json({ error: 'rows did not match; nothing deleted', matched: out.length }); }
-    await client.query('COMMIT');
-    res.json({ deleted: out });
-  } catch (e) { await client.query('ROLLBACK').catch(() => {}); throw e; } finally { client.release(); }
-}));
-
 app.use((req, res) => res.status(404).json({ error: 'not found' }));
 app.use((err, req, res, next) => {
   if (err && err.type === 'entity.too.large') return res.status(413).json({ error: 'body too large' });
