@@ -3,6 +3,7 @@ const express = require('express');
 const { Pool } = require('pg');
 const { parseSpecPage } = require('./lib/specparse');
 const SF = require('./lib/specfetch');
+const A = require('./lib/auth');
 
 const PORT = process.env.PORT || 3000;
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -56,6 +57,18 @@ async function initDb() {
         ALTER TABLE events ADD COLUMN IF NOT EXISTS src_seq BIGINT;
         -- Global cache of PUBLIC manufacturer spec pages. No device id, no user data (DECISIONS #24), so /api/me has nothing to export/delete here.
         CREATE TABLE IF NOT EXISTS spec_cache (key TEXT PRIMARY KEY, body JSONB NOT NULL, fetched_at TIMESTAMPTZ NOT NULL DEFAULT now());
+        -- Optional accounts (additive, 2026-10-31). An account's events live in the same events table under device_id 'u:<id>'
+        -- (':' is not allowed in a device code, so the device routes can never reach an account stream).
+        CREATE TABLE IF NOT EXISTS users (
+          id TEXT PRIMARY KEY, email TEXT NOT NULL, pw_hash TEXT NOT NULL, recovery_hash TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS users_email ON users (lower(email));
+        CREATE TABLE IF NOT EXISTS sessions (
+          token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS sessions_user ON sessions (user_id);
       `);
       dbReady = true;
       console.log('database ready');
@@ -70,18 +83,25 @@ async function initDb() {
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
+// Account routes only answer the app's own origin(s); the device-code routes keep CORS * (unchanged behaviour).
+const CORS_ORIGINS = (process.env.CORS_ORIGINS || 'https://majalen3.github.io').split(',').map((x) => x.trim()).filter(Boolean);
+const isAccountPath = (p) => p.startsWith('/api/auth/') || p === '/api/account' || p.startsWith('/api/account/');
 app.use((req, res, next) => {
   res.set({
     'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
     'Cache-Control': 'no-store',
     'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'",
-    'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Device-Id',
     'Access-Control-Expose-Headers': 'Retry-After, X-Next-Before',
     'Access-Control-Max-Age': '86400',
   });
+  if (isAccountPath(req.path)) {
+    const o = req.get('origin');
+    res.set('Vary', 'Origin');
+    if (o && !CORS_ORIGINS.includes(o)) return res.status(403).json({ error: 'origin not allowed' });
+    if (o) res.set({ 'Access-Control-Allow-Origin': o, 'Access-Control-Allow-Headers': 'Content-Type, Authorization' });
+  } else res.set({ 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, X-Device-Id' });
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
@@ -134,9 +154,9 @@ const num = (v, min, max) => {
   return Number.isFinite(n) && n >= min && n <= max ? n : NaN;
 };
 const bad = (res, msg) => res.status(400).json({ error: msg });
-const wrap = (fn) => async (req, res) => {
+const wrap = (fn) => async (req, res, next) => {
   if (!dbReady) return res.status(503).json({ error: 'database not ready, retry shortly' });
-  try { await fn(req, res); } catch (e) { console.error(e); res.status(500).json({ error: 'server error' }); }
+  try { await fn(req, res, next); } catch (e) { console.error(e); res.status(500).json({ error: 'server error' }); }
 };
 
 app.get('/', (req, res) => res.json({ service: 'arsenal-pro-api', health: '/api/health' }));
@@ -243,7 +263,7 @@ function eventIn(e) {
 }
 // seq = the writing phone's own sequence (part of the envelope, used to order same-ms events); serverSeq = cursor order.
 const eventOut = (r) => ({ id: r.id, seq: r.src_seq === null ? undefined : Number(r.src_seq), serverSeq: String(r.seq), ts: Number(r.ts), type: r.type, entity: r.entity, entityId: r.entity_id, schemaV: r.schema_v, data: r.data, deviceId: r.src, prov: r.prov || undefined, importId: r.import_id || undefined });
-app.post('/api/events', wrap(async (req, res) => {
+async function postEvents(key, quota, req, res) {
   const list = req.body && req.body.events;
   if (!Array.isArray(list) || !list.length) return bad(res, 'body must be {events:[...]} with at least one event');
   if (list.length > EVENT_BATCH_MAX) return bad(res, `at most ${EVENT_BATCH_MAX} events per batch`);
@@ -253,33 +273,35 @@ app.post('/api/events', wrap(async (req, res) => {
   const c = await pool.connect();
   try {
     await c.query('BEGIN');
-    await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [req.device]);
-    const known = (await c.query('SELECT id FROM events WHERE device_id=$1 AND id = ANY($2)', [req.device, ids])).rows.map((r) => r.id);
+    await c.query('SELECT pg_advisory_xact_lock(hashtext($1))', [key]);
+    const known = (await c.query('SELECT id FROM events WHERE device_id=$1 AND id = ANY($2)', [key, ids])).rows.map((r) => r.id);
     const fresh = ids.length - known.length;
-    const stored = Number((await c.query('SELECT count(*) AS n FROM events WHERE device_id=$1', [req.device])).rows[0].n);
-    if (fresh && stored + fresh > QUOTA.events) {
+    const stored = Number((await c.query('SELECT count(*) AS n FROM events WHERE device_id=$1', [key])).rows[0].n);
+    if (fresh && stored + fresh > quota) {
       await c.query('ROLLBACK');
-      return res.status(429).json({ error: `event quota reached: this backup code can store ${QUOTA.events} events on the server (${stored} stored). Everything stays on your phone; download a backup from More to keep a copy.`, quota: QUOTA.events, stored });
+      return res.status(429).json({ error: `event quota reached: this sync stream can store ${quota} events on the server (${stored} stored). Everything stays on your phone; download a backup from Me to keep a copy.`, quota: quota, stored });
     }
     let accepted = 0;
     for (const e of evs) {
       const r = await c.query('INSERT INTO events (device_id,id,ts,type,entity,entity_id,schema_v,data,src,prov,import_id,src_seq) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10::jsonb,$11,$12) ON CONFLICT (device_id,id) DO NOTHING',
-        [req.device, e.id, e.ts, e.type, e.entity, e.entityId, e.sv, e.data, e.src, e.prov, e.importId, e.srcSeq]);
+        [key, e.id, e.ts, e.type, e.entity, e.entityId, e.sv, e.data, e.src, e.prov, e.importId, e.srcSeq]);
       accepted += r.rowCount;
     }
-    const cur = (await c.query('SELECT COALESCE(max(seq),0) AS s FROM events WHERE device_id=$1', [req.device])).rows[0].s;
+    const cur = (await c.query('SELECT COALESCE(max(seq),0) AS s FROM events WHERE device_id=$1', [key])).rows[0].s;
     await c.query('COMMIT');
-    res.status(200).json({ accepted, duplicates: evs.length - accepted, cursor: String(cur), stored: stored + accepted, quota: QUOTA.events });
+    res.status(200).json({ accepted, duplicates: evs.length - accepted, cursor: String(cur), stored: stored + accepted, quota: quota });
   } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
-}));
-app.get('/api/events', wrap(async (req, res) => {
+}
+async function getEvents(key, req, res) {
   const after = req.query.after === undefined ? 0 : /^\d{1,18}$/.test(String(req.query.after)) ? String(req.query.after) : null;
   const limit = req.query.limit === undefined ? 500 : num(req.query.limit, 1, 500);
   if (after === null || Number.isNaN(limit) || !Number.isInteger(limit)) return bad(res, 'after must be a cursor from a previous response and limit 1-500');
-  const { rows } = await pool.query('SELECT * FROM events WHERE device_id=$1 AND seq > $2 ORDER BY seq LIMIT $3', [req.device, after, limit + 1]);
+  const { rows } = await pool.query('SELECT * FROM events WHERE device_id=$1 AND seq > $2 ORDER BY seq LIMIT $3', [key, after, limit + 1]);
   const more = rows.length > limit; if (more) rows.pop();
   res.json({ events: rows.map(eventOut), cursor: rows.length ? String(rows[rows.length - 1].seq) : String(after), more });
-}));
+}
+app.post('/api/events', wrap((req, res) => postEvents(req.device, QUOTA.events, req, res)));
+app.get('/api/events', wrap((req, res) => getEvents(req.device, req, res)));
 
 app.get('/api/me', wrap(async (req, res) => {
   const [l, sl, n, ev] = await Promise.all([
@@ -293,6 +315,101 @@ app.delete('/api/me', wrap(async (req, res) => {
   const out = {};
   for (const t of ['lines', 'surface_log', 'pattern_notes', 'events']) out[t] = (await pool.query(`DELETE FROM ${t} WHERE device_id=$1`, [req.device])).rowCount;
   res.json({ deleted: out });
+}));
+
+// ---- optional accounts (2026-10-31). The app works fully without one; signing in adds a private, synced copy of
+// the bowler's own event stream (balls, layouts, bags, profile, games, shots). Bearer tokens, not cookies: the app
+// (github.io) and this API (onrender.com) are different sites, so cookies would be third-party; a header is also CSRF-proof.
+const PEPPER = process.env.SESSION_PEPPER || '';
+const SESSION_DAYS = +(process.env.SESSION_DAYS || 30);
+const ACCOUNT_QUOTA = +(process.env.ACCOUNT_EVENT_QUOTA || 20000);
+const AUTH_LIMITS = { signupIp: +(process.env.RL_SIGNUP || 5), loginIp: +(process.env.RL_LOGIN_IP || 20), loginEmail: +(process.env.RL_LOGIN_EMAIL || 8) };
+const streamOf = (userId) => 'u:' + userId;
+const userOut = (u) => ({ id: u.id, email: u.email, createdAt: u.created_at });
+const accountsOn = (req, res, next) => (PEPPER.length >= 32 ? next() : res.status(503).json({ error: 'accounts are not configured on this server (SESSION_PEPPER missing)' }));
+const limited = (res, wait) => { res.set('Retry-After', String(wait)); return res.status(429).json({ error: 'too many attempts, try again later', retryAfter: wait }); };
+async function issueSession(userId) {
+  const token = A.newToken(), exp = new Date(Date.now() + SESSION_DAYS * 86400e3);
+  await pool.query('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1,$2,$3)', [A.tokenHash(token, PEPPER), userId, exp]);
+  await pool.query('DELETE FROM sessions WHERE user_id=$1 AND expires_at < now()', [userId]);
+  return { token, expiresAt: exp.toISOString() };
+}
+const needUser = wrap(async (req, res, next) => {
+  const t = A.bearer(req); if (!t) return res.status(401).json({ error: 'sign in required' });
+  const r = await pool.query('SELECT u.id, u.email, u.created_at, u.pw_hash FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash=$1 AND s.expires_at > now()', [A.tokenHash(t, PEPPER)]);
+  if (!r.rowCount) return res.status(401).json({ error: 'session expired or signed out' });
+  const wait = hit('acct:' + r.rows[0].id, LIMITS.device, 60000) || (req.method !== 'GET' ? hit('acctw:' + r.rows[0].id, LIMITS.write, 60000) : 0);
+  if (wait) return limited(res, wait);
+  req.user = r.rows[0]; req.tokenHash = A.tokenHash(t, PEPPER); next();
+});
+const body = (req) => (req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {});
+app.use('/api/auth', accountsOn); app.use('/api/account', accountsOn);
+
+app.post('/api/auth/signup', wrap(async (req, res) => {
+  const b = body(req), email = A.normEmail(b.email), pp = A.passwordProblem(b.password);
+  if (!email) return bad(res, 'a valid email is required');
+  if (pp) return bad(res, pp);
+  const wait = hit('su:' + req.ip, AUTH_LIMITS.signupIp, 3600e3); if (wait) return limited(res, wait);
+  const id = A.newUserId(), recoveryKey = A.newRecoveryKey();
+  const [pw, rk] = await Promise.all([A.hashSecret(b.password), A.hashSecret(A.normRecovery(recoveryKey))]);
+  const r = await pool.query('INSERT INTO users (id, email, pw_hash, recovery_hash) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING RETURNING *', [id, email, pw, rk]);
+  if (!r.rowCount) return res.status(409).json({ error: 'an account with this email already exists; sign in instead' });
+  const s = await issueSession(id);
+  res.status(201).json({ ...s, user: userOut(r.rows[0]), recoveryKey });
+}));
+app.post('/api/auth/login', wrap(async (req, res) => {
+  const b = body(req), email = A.normEmail(b.email);
+  if (!email || typeof b.password !== 'string' || b.password.length > 200) return bad(res, 'email and password required');
+  const wait = hit('li:' + req.ip, AUTH_LIMITS.loginIp, 900e3) || hit('le:' + email, AUTH_LIMITS.loginEmail, 900e3); if (wait) return limited(res, wait);
+  const r = await pool.query('SELECT * FROM users WHERE lower(email)=$1', [email]);
+  const ok = r.rowCount ? await A.verifySecret(b.password, r.rows[0].pw_hash) : (await A.burn(b.password), false);
+  if (!ok) return res.status(401).json({ error: 'email or password is wrong' });
+  res.json({ ...(await issueSession(r.rows[0].id)), user: userOut(r.rows[0]) });
+}));
+// Password reset without email: the one-time recovery key shown at sign-up. Using it rotates the key and signs out every device.
+app.post('/api/auth/recover', wrap(async (req, res) => {
+  const b = body(req), email = A.normEmail(b.email), key = A.normRecovery(b.recoveryKey), pp = A.passwordProblem(b.newPassword);
+  if (!email || key.length !== 20) return bad(res, 'email and the 20-character recovery key are required');
+  if (pp) return bad(res, pp);
+  const wait = hit('li:' + req.ip, AUTH_LIMITS.loginIp, 900e3) || hit('le:' + email, AUTH_LIMITS.loginEmail, 900e3); if (wait) return limited(res, wait);
+  const r = await pool.query('SELECT * FROM users WHERE lower(email)=$1', [email]);
+  const ok = r.rowCount && r.rows[0].recovery_hash ? await A.verifySecret(key, r.rows[0].recovery_hash) : (await A.burn(key), false);
+  if (!ok) return res.status(401).json({ error: 'email or recovery key is wrong' });
+  const recoveryKey = A.newRecoveryKey(), u = r.rows[0];
+  const [pw, rk] = await Promise.all([A.hashSecret(b.newPassword), A.hashSecret(A.normRecovery(recoveryKey))]);
+  await pool.query('UPDATE users SET pw_hash=$2, recovery_hash=$3, updated_at=now() WHERE id=$1', [u.id, pw, rk]);
+  await pool.query('DELETE FROM sessions WHERE user_id=$1', [u.id]);
+  res.json({ ...(await issueSession(u.id)), user: userOut(u), recoveryKey });
+}));
+app.post('/api/auth/logout', needUser, wrap(async (req, res) => {
+  const all = body(req).all === true;
+  const r = all ? await pool.query('DELETE FROM sessions WHERE user_id=$1', [req.user.id]) : await pool.query('DELETE FROM sessions WHERE token_hash=$1', [req.tokenHash]);
+  res.json({ signedOut: r.rowCount });
+}));
+app.get('/api/account', needUser, wrap(async (req, res) => {
+  const n = Number((await pool.query('SELECT count(*) AS n FROM events WHERE device_id=$1', [streamOf(req.user.id)])).rows[0].n);
+  res.json({ user: userOut(req.user), stored: n, quota: ACCOUNT_QUOTA });
+}));
+app.post('/api/account/events', needUser, wrap((req, res) => postEvents(streamOf(req.user.id), ACCOUNT_QUOTA, req, res)));
+app.get('/api/account/events', needUser, wrap((req, res) => getEvents(streamOf(req.user.id), req, res)));
+app.get('/api/account/export', needUser, wrap(async (req, res) => {
+  const ev = await pool.query('SELECT * FROM events WHERE device_id=$1 ORDER BY seq', [streamOf(req.user.id)]);
+  res.set('Content-Disposition', 'attachment; filename="arsenal-pro-account.json"');
+  res.json({ exportedAt: new Date().toISOString(), user: userOut(req.user), events: ev.rows.map(eventOut) });
+}));
+// Deleting an account needs the password again; it removes the user, every session and every event in the account stream.
+app.delete('/api/account', needUser, wrap(async (req, res) => {
+  const pw = body(req).password;
+  if (typeof pw !== 'string' || !(await A.verifySecret(pw, req.user.pw_hash))) return res.status(401).json({ error: 'password is wrong' });
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    const ev = await c.query('DELETE FROM events WHERE device_id=$1', [streamOf(req.user.id)]);
+    const ss = await c.query('DELETE FROM sessions WHERE user_id=$1', [req.user.id]);
+    await c.query('DELETE FROM users WHERE id=$1', [req.user.id]);
+    await c.query('COMMIT');
+    res.json({ deleted: { account: 1, sessions: ss.rowCount, events: ev.rowCount } });
+  } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
 }));
 
 // ---- ball spec lookup on the maker's own site (allowlisted hosts only; see lib/specfetch.js). Proposal only: the app

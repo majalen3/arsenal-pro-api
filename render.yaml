@@ -18,3 +18,10 @@ services:
         fromDatabase:
           name: arsenal-pro-db
           property: connectionString
+      # Optional accounts: HMAC key for session tokens. Render generates it; it never lives in the repo.
+      # Rotating it signs everyone out (no data is lost).
+      - key: SESSION_PEPPER
+        generateValue: true
+      # Origins allowed to call /api/auth/* and /api/account* (comma-separated). Device-code routes stay CORS *.
+      - key: CORS_ORIGINS
+        value: https://majalen3.github.io
