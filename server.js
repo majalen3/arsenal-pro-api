@@ -4,6 +4,7 @@ const { Pool } = require('pg');
 const { parseSpecPage } = require('./lib/specparse');
 const SF = require('./lib/specfetch');
 const A = require('./lib/auth');
+const T = require('./lib/teams');
 
 const PORT = process.env.PORT || 3000;
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -69,7 +70,7 @@ async function initDb() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL
         );
         CREATE INDEX IF NOT EXISTS sessions_user ON sessions (user_id);
-      `);
+      ` + T.SQL);   // My Team tables (additive, 2026-10-31; lib/teams.js)
       dbReady = true;
       console.log('database ready');
       return;
@@ -395,7 +396,7 @@ app.get('/api/account/events', needUser, wrap((req, res) => getEvents(streamOf(r
 app.get('/api/account/export', needUser, wrap(async (req, res) => {
   const ev = await pool.query('SELECT * FROM events WHERE device_id=$1 ORDER BY seq', [streamOf(req.user.id)]);
   res.set('Content-Disposition', 'attachment; filename="arsenal-pro-account.json"');
-  res.json({ exportedAt: new Date().toISOString(), user: userOut(req.user), events: ev.rows.map(eventOut) });
+  res.json({ exportedAt: new Date().toISOString(), user: userOut(req.user), events: ev.rows.map(eventOut), teams: await T.exportUserTeams(pool, req.user.id) });
 }));
 // Deleting an account needs the password again; it removes the user, every session and every event in the account stream.
 app.delete('/api/account', needUser, wrap(async (req, res) => {
@@ -405,12 +406,15 @@ app.delete('/api/account', needUser, wrap(async (req, res) => {
   try {
     await c.query('BEGIN');
     const ev = await c.query('DELETE FROM events WHERE device_id=$1', [streamOf(req.user.id)]);
+    const tm = await T.deleteUserTeams(c, req.user.id);   // hands off the secretary role; deletes teams left empty
     const ss = await c.query('DELETE FROM sessions WHERE user_id=$1', [req.user.id]);
     await c.query('DELETE FROM users WHERE id=$1', [req.user.id]);
     await c.query('COMMIT');
-    res.json({ deleted: { account: 1, sessions: ss.rowCount, events: ev.rowCount } });
+    res.json({ deleted: { account: 1, sessions: ss.rowCount, events: ev.rowCount, teamMemberships: tm } });
   } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
 }));
+// My Team (community hub): /api/account/teams/* (account CORS allowlist + needUser on every route; see lib/teams.js).
+T.mount(app, { pool, needUser, wrap, hit, limited, bad, body, pepper: () => PEPPER });
 
 // ---- ball spec lookup on the maker's own site (allowlisted hosts only; see lib/specfetch.js). Proposal only: the app
 // shows every field with its source and the user confirms before anything is saved. Missing fields are simply absent.

@@ -29,6 +29,25 @@ Routes: `POST /api/auth/signup {email,password}` → `201 {token, expiresAt, use
 `POST /api/auth/logout [{all:true}]` · `GET /api/account` → `{user, stored, quota}` · `GET|POST /api/account/events` (same contract as
 `/api/events`) · `GET /api/account/export` → `{user, events}` · `DELETE /api/account {password}` → removes the user, sessions and events.
 
+## My Team (`/api/account/teams/*`, needs an account)
+
+A small team hub for league nights (app: `#/team`, under Bag). Additive tables only (`teams`, `team_members`, `team_invites`,
+`team_shares`, `team_notes`, `team_reports`; all `CREATE TABLE IF NOT EXISTS`, in `lib/teams.js`). Rules:
+- Every route is behind the account session and the account CORS allowlist. A non-member gets **404** for any team route (existence
+  is not leaked); secretary-only actions answer 403 to members. Teammates see display names and per-team member ids, never emails or account ids.
+- Invite codes: 8 characters `XXXX-XXXX` (no 0/O/1/I), shown once, stored as `HMAC-SHA256('invite:'+code, SESSION_PEPPER)`;
+  expire in 1–14 days (default 7), optional use cap, revocable. Expired/revoked/used-up/unknown → 410.
+- Sharing is per item (`bag`, `stats`, `tags`, `regular`), strict shapes, unknown fields dropped, 2000 bytes each. No ranking fields exist.
+- Caps: 10 teams per account, 40 members, 300 notes, 10 open invites, 100 open reports. Rate limits: create 5/day, join 10/15 min
+  per account and 30/15 min per IP, invites 20/h, notes 30/h, reports 10/h (env `RL_TEAM_*` override for tests).
+- Removing or leaving deletes that member's shares, notes and reports; the last member leaving deletes the team; if the secretary
+  leaves, the earliest-joined member becomes secretary. No profanity filter: the secretary handles reports and can remove notes/members.
+- `GET /api/account/export` includes `teams` (my memberships, my shares, my notes); `DELETE /api/account` removes them too.
+
+Routes: `GET|POST /` · `POST /join {code,displayName}` · `GET /:tid` · `POST /:tid/settings` (sec) · `POST /:tid/me` ·
+`GET|POST /:tid/invites`, `DELETE /:tid/invites/:iid` (sec) · `POST|DELETE /:tid/shares/:kind` · `POST /:tid/notes`, `DELETE /:tid/notes/:nid` ·
+`POST /:tid/reports`, `DELETE /:tid/reports/:rid` (sec) · `DELETE /:tid/members/:mid` (`me` = leave) · `DELETE /:tid` (sec).
+
 ## Endpoints (JSON, CORS `*` incl. `X-Device-Id`, 20kb body limit, security headers)
 - `GET /api/health`
 - `POST /api/lines` `{ballId,name,release,aim,speed,rev,oil?,finish,pattern,note}` — upsert by ballId+name
@@ -55,4 +74,4 @@ RG/Diff tables. Response `status`: `found` (with `source.url`, `source.fetchedAt
 1 day otherwise). **`spec_cache` is global public maker data with no device id**, so `/api/me` has nothing of the user's in it.
 
 ## Tests
-`BASE=http://localhost:8787 npm test` (node:test; needs a running server + Postgres started with `SESSION_PEPPER=<32+ chars> RL_SIGNUP=1000 EVENT_QUOTA=50`; cleans up its own device ids and accounts).
+`BASE=http://localhost:8787 npm test` (node:test; needs a running server + Postgres started with `SESSION_PEPPER=<32+ chars> RL_SIGNUP=1000 EVENT_QUOTA=50 RL_TEAM_CREATE=1000 RL_TEAM_JOIN=1000 RL_TEAM_JOIN_IP=1000`; optional `TEST_DATABASE_URL` (a local DB only) lets the invite-expiry check move an expiry into the past; refuses to run against onrender.com; cleans up its own device ids and accounts).
