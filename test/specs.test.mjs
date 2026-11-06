@@ -39,7 +39,7 @@ test('No spec block → no fields (nothing invented)', () => {
   const r = P.parseSpecPage(FX.empty); assert.deepEqual(r.fields, {}); assert.deepEqual(r.weights, {});
 });
 test('Zero invented values: every returned raw value appears in the source text', () => {
-  for (const k of ['storm', 'rotogrip', 'craft', 'shopify', 'rows']) {
+  for (const k of ['storm', 'rotogrip', 'craft', 'shopify', 'rows', 'motiv']) {
     const text = P.htmlToLines(FX[k]).join('\n'), r = P.parseSpecPage(FX[k]);
     for (const [f, v] of Object.entries(r.fields)) assert.ok(text.includes(v.raw), `${k}.${f} raw "${v.raw}" not in source`);
     const nums = new Set((text.match(/\d*\.\d+/g) || []).map(Number));
@@ -54,7 +54,7 @@ test('dates and kinds', () => {
 test('URL guard: allowlist, https only, no creds, no odd ports', () => {
   assert.equal(F.checkUrl('https://radicalbowling.com/products/balls/x').ok, true);
   assert.equal(F.checkUrl('https://www.stormbowling.com/storm-phaze-ii-bowling-ball').ok, true);
-  for (const u of ['http://radicalbowling.com/', 'https://evil.example.com/', 'https://radicalbowling.com.evil.io/', 'https://user:pw@radicalbowling.com/', 'https://radicalbowling.com:8443/', 'https://169.254.169.254/latest', 'file:///etc/passwd', 'not a url', 'https://motivbowling.com/'])
+  for (const u of ['http://radicalbowling.com/', 'https://evil.example.com/', 'https://radicalbowling.com.evil.io/', 'https://user:pw@radicalbowling.com/', 'https://radicalbowling.com:8443/', 'https://169.254.169.254/latest', 'file:///etc/passwd', 'not a url'])
     assert.equal(F.checkUrl(u).ok, false, u);
 });
 test('private address detection', () => {
@@ -77,7 +77,36 @@ test('discovery scoring: only an exact ordered name scores 1', () => {
   assert.ok(F.score(F.tokens('Prism'), F.tokens('prism-warp')) < 0.75);
   assert.equal(F.score(F.tokens('Rattler Big Bite'), F.tokens('rattler-big-bite')), 1);
 });
-test('brands: aliases and the unsupported route', () => {
+test('brands: aliases and Motiv route', () => {
   assert.equal(F.brandOf('Roto Grip').prefix, 'roto-grip'); assert.equal(F.brandOf('900 GLOBAL').prefix, '900-global');
-  assert.equal(F.brandOf('Motiv').strategy, 'unsupported'); assert.equal(F.brandOf('Acme'), null);
+  assert.equal(F.brandOf('Motiv').strategy, 'motiv'); assert.equal(F.brandOf('Acme'), null);
+});
+
+test('Motiv: explicit weight panels, no first-panel headline leaking across weights', () => {
+  const r = P.parseSpecPage(FX.motiv);
+  assert.equal(r.title, 'Jackal Ghost V2 | Heavy Oil');
+  assert.deepEqual(r.weights[15], { rg:2.47, diff:0.054, intDiff:0.015 });
+  assert.deepEqual(r.weights[16], { rg:2.48, diff:0.047, intDiff:0.013 });
+  assert.equal(r.fields.rg, undefined); assert.equal(r.fields.diff, undefined); assert.equal(r.fields.intDiff, undefined);
+  assert.equal(r.headlineWeight, null); assert.equal(r.fields.symmetry.v, 'Asymmetric');
+  assert.equal(r.fields.coverType, undefined, 'HFS Reactive does not print solid/pearl/hybrid; do not guess');
+});
+test('Motiv guard accepts only maker hosts and rejects lookalikes', () => {
+  for (const h of ['www.motivbowling.com','motivbowling.com']) {
+    assert.equal(F.checkUrl('https://' + h + '/products/balls/heavy-oil/jackal-ghost-v2.html').ok, true);
+    assert.equal(F.brandForHost(h).key, 'motiv');
+  }
+  for (const u of ['https://motivbowling.com.evil.test/', 'http://motivbowling.com/', 'https://motivbowling.com:444/', 'https://u:p@motivbowling.com/']) assert.equal(F.checkUrl(u).ok, false);
+});
+test('Motiv discovery: same scoring, exact/ambiguous/unknown model handling; cached sitemap only', async () => {
+  const b = F.brandOf('Motiv'), c = F._caches.sitemapCache;
+  c.set(b.key, { at:Date.now(), urls:[
+    'https://www.motivbowling.com/products/balls/heavy-oil/jackal-ghost.html',
+    'https://www.motivbowling.com/products/balls/heavy-oil/jackal-ghost-v2.html',
+    'https://www.motivbowling.com/products/balls/heavy-oil/jackal-ambush.html'] });
+  try {
+    const r = await F.discover(b, 'Motiv Jackal Ghost V2'); assert.equal(r[0].score, 1); assert.match(r[0].url, /jackal-ghost-v2.html$/);
+    const partial = await F.discover(b, 'Jackal'); assert.ok(partial.length > 1); assert.ok(partial.every(x => x.score < 1));
+    assert.deepEqual(await F.discover(b, 'Nonexistent Zzz'), []);
+  } finally { c.delete(b.key); }
 });
