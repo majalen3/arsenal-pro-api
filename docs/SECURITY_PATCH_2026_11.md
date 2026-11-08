@@ -1,0 +1,7 @@
+# Supported parser patch —8 November2026 America/New_York (EST)
+
+Based on unmerged API2 a4fe0b3. Before: Express4.22.3 →body-parser1.20.8 →raw-body2.5.3; npm audit exit1, one HIGH GHSA-27r3-jxmh-p828. Authoritative advisory opened this turn: https://github.com/advisories/GHSA-27r3-jxmh-p828 (GitHub public advisory API confirms1.20.9 and2.4.0 patched). A trailing invalid compressed frame can raise an uncaught decoder error before auth/routing.
+
+Minimal supported patch: only body-parser1.20.8→1.20.9 lockfile entry/integrity, within Express's existing~1.20.8 range. Express/API/runtime/auth/pepper/rate limits/20kb limit/production config unchanged; no forced major or audit suppression. `npm update body-parser --package-lock-only --ignore-scripts`, then clean `npm ci`; after npm audit exits0, zero advisories. App has no npm manifest/runtime npm dependency tree; vendored assets are not covered by this API audit and must not be claimed fully certified.
+
+Parser-only loopback ephemeral child test covers gzip/deflate JSON compatibility,20kb decompressed limit, malformed gzip/trailing bytes and continued health. No DB, account, credentials or production server. Full isolated PostgreSQL integration hosted results reported with delivery; prior local server availability remains unverified/blocked, never substitute production. Stacked on API2; no merge/deploy performed. Fresh main-target CI required after owner-approved integration.
