@@ -8,13 +8,14 @@ jobs:
         image: postgres:16
         env: { POSTGRES_PASSWORD: p, POSTGRES_USER: u, POSTGRES_DB: t }
         ports: ['5432:5432']
-        options: --health-cmd "pg_isready -U u" --health-interval 5s --health-retries 10
+        options: --health-cmd "pg_isready -U u -d t" --health-interval 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
       - run: npm ci
-      - run: |
-          DATABASE_URL=postgres://u:p@localhost:5432/t PGSSL=off PORT=8787 EVENT_QUOTA=50 node server.js &
-          sleep 5
-          BASE=http://localhost:8787 npm test
+      - name: Isolated synthetic integration suite (never production configuration)
+        env:
+          TEST_DATABASE_URL: postgres://u:p@127.0.0.1:5432/t
+          ALLOW_DISPOSABLE_TEST_DB: '1'
+        run: npm run test:local

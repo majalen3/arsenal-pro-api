@@ -66,8 +66,8 @@ Routes: `GET|POST /` · `POST /join {code,displayName}` · `GET /:tid` · `POST 
 
 `GET /api/spec-lookup?brand=Radical&name=Rattler%20Big%20Bite` or `?url=<maker product page>`. The API fetches **only** the
 manufacturer hosts in `lib/specfetch.js` (Storm site incl. Roto Grip/900 Global, Brunswick, Radical, DV8, Hammer, Ebonite, Track,
-Columbia 300), https only, every redirect re-checked, public IPs only, 1.5 MB / 8 s caps, robots.txt + Crawl-delay honoured, UA
-`ArsenalProSpecLookup/1.0`. Motiv is `unsupported` (their site answers 403). `lib/specparse.js` returns only labelled values printed
+Columbia 300, Motiv), https only, every redirect re-checked, public IPs only, 1.5 MB / 8 s caps, robots.txt + Crawl-delay honoured, UA
+`ArsenalProSpecLookup/1.0`. Motiv uses its public sitemap and explicit weight panels (including intermediate differential); no cover family is guessed when the page prints only “Reactive”. `lib/specparse.js` returns only labelled values printed
 on the page (`{v, raw, label}`, `derived:true` when cover type/symmetry come from the printed cover/core name) and per-weight
 RG/Diff tables. Response `status`: `found` (with `source.url`, `source.fetchedAt`), `candidates` (pick one, then call with `?url=`),
 `not-found`, `unsupported`, `blocked`, `busy`; 400 on bad input or an off-list URL. Results are cached in `spec_cache` (30 days found,

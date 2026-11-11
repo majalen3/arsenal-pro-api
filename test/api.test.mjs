@@ -138,8 +138,7 @@ test('spec-lookup: validation and allowlist (no outbound fetches)', async () => 
   assert.equal(off.status, 400); assert.match(off.json.error, /allowlist/);
   assert.equal((await call('GET', '/api/spec-lookup?url=' + encodeURIComponent('http://radicalbowling.com/'))).status, 400);
   assert.equal((await call('GET', '/api/spec-lookup?url=' + encodeURIComponent('https://169.254.169.254/latest/meta-data'))).status, 400);
-  const mo = await call('GET', '/api/spec-lookup?brand=Motiv&name=Jackal');
-  assert.equal(mo.status, 200); assert.equal(mo.json.status, 'unsupported');
+  assert.equal((await call('GET', '/api/spec-lookup?brand=Motiv&name=' + 'x'.repeat(61))).status, 400);
   const un = await call('GET', '/api/spec-lookup?brand=Acme&name=Rocket');
   assert.equal(un.status, 200); assert.equal(un.json.status, 'unsupported');
 });
