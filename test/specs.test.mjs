@@ -110,3 +110,16 @@ test('Motiv discovery: same scoring, exact/ambiguous/unknown model handling; cac
     assert.deepEqual(await F.discover(b, 'Nonexistent Zzz'), []);
   } finally { c.delete(b.key); }
 });
+
+// t123u: a guessed Storm-site address that is missing falls back to the site's own product search.
+test('storm-site search results become candidates for the right brand only (900 Global, Roto Grip)', () => {
+  const html = '<a href="/900-global-sublime-bowling-ball">x</a><a href="/900-global-sublime-focus-bowling-ball">y</a><a href="/roto-grip-hustle-bowling-ball-earth">z</a><a href="/roto-grip-hustle-sos-bowling-ball">w</a><a href="/900-global-brand">b</a>';
+  const g = F.BRANDS.find((b) => b.key === '900 global'), rg = F.BRANDS.find((b) => b.key === 'roto grip');
+  const s = F.searchCands(g, 'Sublime', html);
+  assert.deepEqual(s.map((c) => c.label), ['sublime', 'sublime focus']); assert.equal(s[0].score, 1);
+  assert.equal(s[0].url, 'https://www.stormbowling.com/900-global-sublime-bowling-ball');
+  const h = F.searchCands(rg, 'Hustle Earth', html); assert.equal(h[0].url, 'https://www.stormbowling.com/roto-grip-hustle-bowling-ball-earth'); assert.equal(h[0].score, 1);
+  assert.ok(F.searchCands(rg, 'Hustle', html).every((c) => c.url.includes('/roto-grip-')));
+  assert.equal(F.searchUrlFor(g, 'Sublime'), 'https://www.stormbowling.com/product_search/?q=Sublime');
+  assert.equal(F.searchUrlFor(F.BRANDS.find((b) => b.strategy !== 'storm'), 'x'), null);
+});
