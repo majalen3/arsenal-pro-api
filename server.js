@@ -418,6 +418,8 @@ T.mount(app, { pool, needUser, wrap, hit, limited, bad, body, pepper: () => PEPP
 
 // ---- ball spec lookup on the maker's own site (allowlisted hosts only; see lib/specfetch.js). Proposal only: the app
 // shows every field with its source and the user confirms before anything is saved. Missing fields are simply absent.
+// Cache key version: bumped with the t123u search fallback so misses saved by the old lookup are not served again.
+const CK = 'v2:';
 const LOOKUP_TTL = { found: 30 * 86400e3, other: 86400e3 };
 async function cacheGet(key) {
   if (!dbReady) return null;
@@ -449,7 +451,7 @@ app.get('/api/spec-lookup', async (req, res) => {
   try {
     if (url) {
       const c = SF.checkUrl(url); if (!c.ok) return bad(res, 'url rejected: ' + c.why);
-      const key = 'u:' + c.url.href, hitc = await cacheGet(key); if (hitc) return send(hitc, true);
+      const key = CK + 'u:' + c.url.href, hitc = await cacheGet(key); if (hitc) return send(hitc, true);
       const out = await fetchSpecPage(c.url.href, SF.brandForHost(c.url.hostname));
       if (out.status === 'found' || out.status === 'not-found') await cachePut(key, out);
       return send(out);
@@ -458,7 +460,7 @@ app.get('/api/spec-lookup', async (req, res) => {
     if (!brand) return send({ status: 'unsupported', why: 'No lookup route for this brand yet. Pick from the catalog or type the specs in.', brand: brandQ });
     if (brand.strategy === 'unsupported') return send({ status: 'unsupported', why: brand.why, brand: brand.key });
     const qt = SF.tokens(name); if (!qt.length) return bad(res, 'name has no searchable words');
-    const key = 'q:' + brand.key + '|' + qt.join(' '), hitc = await cacheGet(key); if (hitc) return send(hitc, true);
+    const key = CK + 'q:' + brand.key + '|' + qt.join(' '), hitc = await cacheGet(key); if (hitc) return send(hitc, true);
     const cands = await SF.discover(brand, name);
     let out;
     if (!cands.length) out = { status: 'not-found', why: "no product on the maker's site matches that name", brand: brand.key };
