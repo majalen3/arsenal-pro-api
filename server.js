@@ -435,7 +435,7 @@ async function fetchSpecPage(url, brand) {
   if (!r.ok) return { status: 'not-found', why: `maker page answered ${r.status}`, brand: brand && brand.key, tried: url };
   const p = parseSpecPage(r.body);
   const base = { brand: brand && brand.key, source: { url: r.url, host: new URL(r.url).hostname, fetchedAt: new Date().toISOString(), title: p.title } };
-  if (!Object.keys(p.fields).length && !Object.keys(p.weights).length) return { status: 'not-found', why: 'no spec table found on the maker page', ...base };
+  if (!Object.keys(p.fields).length && !Object.keys(p.weights).length) return { status: 'not-found', noSpecs: true, why: 'The maker page for this ball lists no specs (no RG or differential).', ...base };
   return { status: 'found', ...base, fields: p.fields, weights: p.weights, headlineWeight: p.headlineWeight };
 }
 app.get('/api/spec-lookup', async (req, res) => {
@@ -464,7 +464,14 @@ app.get('/api/spec-lookup', async (req, res) => {
     if (!cands.length) out = { status: 'not-found', why: "no product on the maker's site matches that name", brand: brand.key };
     else if (cands[0].template || cands[0].score === 1 || (cands[0].score >= 0.75 && (!cands[1] || cands[0].score - cands[1].score >= 0.15))) {
       out = await fetchSpecPage(cands[0].url, brand);
-      if (out.status !== 'found' && cands[0].template) out.why = "no page for that name on the maker's site (try the exact model name)";
+      // t123u: a guessed address that is not there is not the end: search the maker's own site for the real page.
+      if (out.status === 'not-found' && cands[0].template && !out.noSpecs) {
+        const alt = await SF.stormSearch(brand, name).catch(() => []);
+        if (alt.length && alt[0].score === 1 && (!alt[1] || alt[1].score < 1)) out = await fetchSpecPage(alt[0].url, brand);
+        else if (alt.length) out = { status: 'candidates', brand: brand.key, candidates: alt.map(({ url: u, label, score }) => ({ url: u, label, score: Math.round(score * 100) / 100 })) };
+        else out.why = "No page with that name on the maker's site.";
+      }
+      const su = SF.searchUrlFor(brand, name); if (su && out.status !== 'found') out.searchUrl = su;
     } else out = { status: 'candidates', brand: brand.key, candidates: cands.map(({ url: u, label, score }) => ({ url: u, label, score: Math.round(score * 100) / 100 })) };
     if (out.status === 'found' || out.status === 'not-found' || out.status === 'candidates') await cachePut(key, out);
     return send(out);
