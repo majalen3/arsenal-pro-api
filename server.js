@@ -3,6 +3,7 @@ const express = require('express');
 const { Pool } = require('pg');
 const { parseSpecPage } = require('./lib/specparse');
 const SF = require('./lib/specfetch');
+const CH = require('./lib/specchain');
 const A = require('./lib/auth');
 const T = require('./lib/teams');
 
@@ -419,7 +420,7 @@ T.mount(app, { pool, needUser, wrap, hit, limited, bad, body, pepper: () => PEPP
 // ---- ball spec lookup on the maker's own site (allowlisted hosts only; see lib/specfetch.js). Proposal only: the app
 // shows every field with its source and the user confirms before anything is saved. Missing fields are simply absent.
 // Cache key version: bumped with the t123u search fallback so misses saved by the old lookup are not served again.
-const CK = 'v2:';
+const CK = 'v3:';   // v3: chain result (per-field source type, archived/USBC/secondary steps)
 const LOOKUP_TTL = { found: 30 * 86400e3, other: 86400e3 };
 async function cacheGet(key) {
   if (!dbReady) return null;
@@ -440,6 +441,14 @@ async function fetchSpecPage(url, brand) {
   if (!Object.keys(p.fields).length && !Object.keys(p.weights).length) return { status: 'not-found', noSpecs: true, why: 'The maker page for this ball lists no specs (no RG or differential).', ...base };
   return { status: 'found', ...base, fields: p.fields, weights: p.weights, headlineWeight: p.headlineWeight };
 }
+// Legal source chain (lib/specchain.js): maker page → archived maker page → USBC list → public secondary, per-field source, nothing overwritten.
+async function withChain(out, brandName, name, makerUrls) {
+  if (!out || out.status === 'candidates') return out;
+  const chained = await CH.runChain({ brand: brandName, name, maker: out, makerUrls });
+  if (out.searchUrl) chained.searchUrl = out.searchUrl;
+  if (out.brand && !chained.brand) chained.brand = out.brand;
+  return chained.status === 'not-found' || chained.status === 'blocked' || chained.status === 'busy' ? Object.assign({}, out, { chain: chained.chain, why: chained.why || out.why }) : chained;
+}
 app.get('/api/spec-lookup', async (req, res) => {
   const t0 = Date.now();
   const wait = hit('lk:' + req.ip, LIMITS.lookup, 600000);
@@ -452,13 +461,17 @@ app.get('/api/spec-lookup', async (req, res) => {
     if (url) {
       const c = SF.checkUrl(url); if (!c.ok) return bad(res, 'url rejected: ' + c.why);
       const key = CK + 'u:' + c.url.href, hitc = await cacheGet(key); if (hitc) return send(hitc, true);
-      const out = await fetchSpecPage(c.url.href, SF.brandForHost(c.url.hostname));
-      if (out.status === 'found' || out.status === 'not-found') await cachePut(key, out);
+      const hb = SF.brandForHost(c.url.hostname);
+      const out = await withChain(await fetchSpecPage(c.url.href, hb), (hb && hb.key) || brandQ, name, [c.url.href]);
+      if (out.status === 'found' || out.status === 'not-found' || out.status === 'usbc-only') await cachePut(key, out);
       return send(out);
     }
     const brand = SF.brandOf(brandQ);
-    if (!brand) return send({ status: 'unsupported', why: 'No lookup route for this brand yet. Pick from the catalog or type the specs in.', brand: brandQ });
-    if (brand.strategy === 'unsupported') return send({ status: 'unsupported', why: brand.why, brand: brand.key });
+    if (!brand || brand.strategy === 'unsupported') {   // no maker route: the USBC list and public references can still help (never the banned sites)
+      const base = { status: 'unsupported', why: brand ? brand.why : 'No maker lookup for this brand yet. Pick from the catalog or type the specs in.', brand: brand ? brand.key : brandQ };
+      const ch = await withChain(base, brandQ, name, []);
+      return send(ch.status === 'found' || ch.status === 'usbc-only' ? Object.assign(ch, { makerWhy: base.why }) : Object.assign(base, { chain: ch.chain }));
+    }
     const qt = SF.tokens(name); if (!qt.length) return bad(res, 'name has no searchable words');
     const key = CK + 'q:' + brand.key + '|' + qt.join(' '), hitc = await cacheGet(key); if (hitc) return send(hitc, true);
     const cands = await SF.discover(brand, name);
@@ -475,7 +488,8 @@ app.get('/api/spec-lookup', async (req, res) => {
       }
       const su = SF.searchUrlFor(brand, name); if (su && out.status !== 'found') out.searchUrl = su;
     } else out = { status: 'candidates', brand: brand.key, candidates: cands.map(({ url: u, label, score }) => ({ url: u, label, score: Math.round(score * 100) / 100 })) };
-    if (out.status === 'found' || out.status === 'not-found' || out.status === 'candidates') await cachePut(key, out);
+    if (out.status !== 'candidates') out = await withChain(out, brandQ, name, cands.slice(0, 1).map((c) => c.url));
+    if (out.status === 'found' || out.status === 'not-found' || out.status === 'candidates' || out.status === 'usbc-only') await cachePut(key, out);
     return send(out);
   } catch (e) { console.error('spec-lookup', e.message); return res.status(502).json({ status: 'error', error: 'lookup failed', why: e.code === 'TOO_LARGE' ? 'maker page too large' : 'maker site did not answer in time' }); }
 });
