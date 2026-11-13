@@ -123,3 +123,9 @@ test('storm-site search results become candidates for the right brand only (900 
   assert.equal(F.searchUrlFor(g, 'Sublime'), 'https://www.stormbowling.com/product_search/?q=Sublime');
   assert.equal(F.searchUrlFor(F.BRANDS.find((b) => b.strategy !== 'storm'), 'x'), null);
 });
+test('older Storm layout ("15 lbs." panels): per-weight RG/diff, never a headline value of the first (lightest) weight', () => {
+  const r = P.parseSpecPage(FX.storm_archived);
+  assert.deepEqual(r.weights, { 14: { rg: 2.55, diff: 0.03 }, 15: { rg: 2.53, diff: 0.03 }, 16: { rg: 2.53, diff: 0.03 } });
+  assert.equal(r.fields.rg, undefined, 'a bare RG would be the 14 lb value with no weight attached'); assert.equal(r.fields.diff, undefined);
+  assert.equal(r.fields.core.v, 'Hustle');
+});

@@ -6,3 +6,7 @@
 - Read printed facts only. MOTIV's weight-specific panels take precedence over headline RG/differential values. Parse Max Differential and Int. Differential aliases; absent/invalid values remain absent. Never copy one weight's number into a different panel or infer a missing spec.
 - Local tests cover explicit weight facts, missing headline leakage, exact/ambiguous/unknown cached-sitemap discovery and lookalike-host rejection. A factual Jackal Ghost V2 fixture is based on the maker page; it is not an accuracy claim about bowling motion.
 - Local-only verification: 58 API tests pass against an isolated database/test server. No live database writes or deployment. This feature deploys through the normal flow only after the PR is reviewed and merged.
+
+
+## Spec lookup source chain (2026-11-12)
+Decision: after the maker page, the lookup tries an archived maker page, then the bundled USBC approved list, then allowlisted secondary pages, only for fields still missing. Why: owner t139u wants the research used when a ball is picked in Add a ball. Consequences: banned hosts are rejected in code; Wayback is rate-limited (2.5 s) and capped by an 18 s budget; USBC supplies approval date only (never release date); forums are never fetched; the user confirms in the app before anything is saved. Deploy bumps cache key to v3 (old entries ignored). Refresh the USBC file with `node scripts/usbc_refresh.mjs` when the list is republished.
