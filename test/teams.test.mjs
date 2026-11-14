@@ -156,3 +156,57 @@ test('account export includes my team footprint only; account delete removes it 
   made.splice(made.indexOf(sec), 1);
   const v = await call('GET', `${T}/${tid}`, { token: m.token }); assert.equal(v.status, 200); assert.equal(v.json.me.role, 'secretary', 'handed off'); assert.equal(v.json.members.length, 1); assert.equal(v.json.notes.length, 0);
 });
+
+test('moderation v2: report a shared item, hide and un-hide (Undo) a member or a note, nothing is deleted', async () => {
+  const sec = await user(), a = await user(), b = await user(), out = await user();
+  const t = await team(sec), tid = t.team.id, code = (await invite(sec, tid)).code;
+  const ja = (await join(a, code, 'Alex')).json, jb = (await join(b, code, 'Blake')).json;
+  await call('POST', `${T}/${tid}/shares/tags`, { token: a.token, body: { data: { tags: ['coach'] } } });
+  await call('POST', `${T}/${tid}/shares/bag`, { token: a.token, body: { data: { title: 'Tonight', balls: [{ name: 'Phaze II', role: 'Benchmark', why: '' }] } } });
+  const n1 = (await call('POST', `${T}/${tid}/notes`, { token: a.token, body: { lanes: '5-6', text: 'Hooks early' } })).json;
+  const n2 = (await call('POST', `${T}/${tid}/notes`, { token: b.token, body: { text: 'Fine note' } })).json;
+  const view = (u) => call('GET', `${T}/${tid}`, { token: u.token });
+  const v0 = await view(b); assert.equal(v0.json.moderation, 2, 'the view advertises moderation v2 so the app can gate its buttons');
+
+  // report one shared item: kind must be a real item and needs a member
+  assert.equal((await call('POST', `${T}/${tid}/reports`, { token: b.token, body: { memberId: ja.memberId, kind: 'bag', reason: 'Not about bowling' } })).status, 201);
+  assert.equal((await call('POST', `${T}/${tid}/reports`, { token: b.token, body: { memberId: ja.memberId, kind: 'photos' } })).status, 400, 'unknown item kind');
+  assert.equal((await call('POST', `${T}/${tid}/reports`, { token: b.token, body: { kind: 'bag' } })).status, 400, 'item needs a member');
+  assert.equal((await call('POST', `${T}/${tid}/reports`, { token: b.token, body: { noteId: n1.id, kind: 'bag' } })).status, 400, 'a note report has no item kind');
+  const vs = await view(sec); assert.equal(vs.json.reports.length, 1); assert.equal(vs.json.reports[0].kind, 'bag'); assert.equal(vs.json.reports[0].aboutMember, ja.memberId);
+
+  // only the secretary can hide; not a stranger, not a member, not yourself
+  for (const [who, expect] of [[b, 403], [a, 403], [out, 404]]) assert.equal((await call('POST', `${T}/${tid}/members/${ja.memberId}/hide`, { token: who.token, body: { hidden: true } })).status, expect, 'hide by non-secretary');
+  assert.equal((await call('POST', `${T}/${tid}/members/${ja.memberId}/hide`, { token: sec.token, body: {} })).status, 400, 'hidden must be a boolean');
+  assert.equal((await call('POST', `${T}/${tid}/members/${t.memberId}/hide`, { token: sec.token, body: { hidden: true } })).status, 400, 'the secretary cannot hide themself');
+  assert.equal((await call('POST', `${T}/${tid}/members/${'f'.repeat(16)}/hide`, { token: sec.token, body: { hidden: true } })).status, 404, 'unknown member');
+  assert.equal((await call('POST', `${T}/${tid}/notes/${n1.id}/hide`, { token: b.token, body: { hidden: true } })).status, 403);
+
+  // hide Alex: teammates see an empty card and no notes; the secretary and Alex still see what happened
+  const h = await call('POST', `${T}/${tid}/members/${ja.memberId}/hide`, { token: sec.token, body: { hidden: true } }); assert.equal(h.status, 200); assert.equal(h.json.hidden, true);
+  const vb = (await view(b)).json, ca = vb.members.find((m) => m.memberId === ja.memberId);
+  assert.deepEqual(ca.shares, {}); assert.equal(ca.hidden, undefined, 'teammates are not told why'); assert.equal(ca.displayName, 'Alex');
+  assert.deepEqual(vb.notes.map((n) => n.id), [n2.id], 'a hidden member\u2019s notes are withheld');
+  const vsec = (await view(sec)).json; assert.equal(vsec.members.find((m) => m.memberId === ja.memberId).hidden, true); assert.ok(vsec.members.find((m) => m.memberId === ja.memberId).shares.bag, 'the secretary still sees it to decide');
+  const va = (await view(a)).json; assert.equal(va.me.hidden, true); assert.equal(va.members.find((m) => m.memberId === ja.memberId).hidden, true); assert.ok(va.members.find((m) => m.memberId === ja.memberId).shares.tags, 'the owner keeps seeing their own items');
+  // Undo: everything comes back, because nothing was deleted
+  assert.equal((await call('POST', `${T}/${tid}/members/${ja.memberId}/hide`, { token: sec.token, body: { hidden: false } })).json.hidden, false);
+  const vb2 = (await view(b)).json; assert.ok(vb2.members.find((m) => m.memberId === ja.memberId).shares.bag); assert.equal(vb2.notes.length, 2);
+  assert.equal((await view(a)).json.me.hidden, false);
+
+  // hide one note only, then Undo
+  assert.equal((await call('POST', `${T}/${tid}/notes/${n1.id}/hide`, { token: sec.token, body: { hidden: true } })).status, 200);
+  assert.deepEqual((await view(b)).json.notes.map((n) => n.id), [n2.id]);
+  assert.equal((await view(sec)).json.notes.find((n) => n.id === n1.id).hidden, true);
+  assert.equal((await view(a)).json.notes.some((n) => n.id === n1.id), false, 'a hidden note is hidden from its author too');
+  assert.equal((await call('POST', `${T}/${tid}/notes/${n1.id}/hide`, { token: sec.token, body: { hidden: false } })).status, 200);
+  assert.equal((await view(b)).json.notes.length, 2);
+  assert.equal((await call('POST', `${T}/${tid}/notes/999999999/hide`, { token: sec.token, body: { hidden: true } })).status, 404);
+
+  // hiding does not delete: the account export for Alex says so, and removing is still the permanent step
+  await call('POST', `${T}/${tid}/members/${ja.memberId}/hide`, { token: sec.token, body: { hidden: true } });
+  const ex = await call('GET', '/api/account/export', { token: a.token }); assert.equal(ex.json.teams[0].hiddenByTeam, true); assert.equal(ex.json.teams[0].shares.length, 2);
+  assert.equal((await call('DELETE', `${T}/${tid}/members/${ja.memberId}`, { token: sec.token })).json.removed, true);
+  assert.equal((await view(b)).json.members.length, 3 - 1);
+  assert.equal(jb.role, 'member');
+});
