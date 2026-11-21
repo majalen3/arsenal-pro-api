@@ -5,6 +5,7 @@ import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
+import http from 'node:http';
 const BASE = process.env.BASE || 'http://localhost:8787';
 if (/onrender\.com/.test(BASE)) throw new Error('team tests write data: never run them against production');
 const ORIGIN = 'https://majalen3.github.io';
@@ -209,4 +210,29 @@ test('moderation v2: report a shared item, hide and un-hide (Undo) a member or a
   assert.equal((await call('DELETE', `${T}/${tid}/members/${ja.memberId}`, { token: sec.token })).json.removed, true);
   assert.equal((await view(b)).json.members.length, 3 - 1);
   assert.equal(jb.role, 'member');
+});
+
+// A browser revalidates its own cached copy with If-None-Match and no Cache-Control header. fetch() cannot send that (the fetch
+// spec adds Cache-Control: no-cache when a script sets If-None-Match), so these checks use node:http.
+const revalidateGet = (path, token, etag) => new Promise((resolve, reject) => {
+  const u = new URL(BASE + path);
+  http.get({ hostname: u.hostname, port: u.port, path: u.pathname, headers: { Origin: ORIGIN, Authorization: 'Bearer ' + token, 'If-None-Match': etag } }, (r) => {
+    let b = ''; r.on('data', (c) => { b += c; }); r.on('end', () => resolve({ status: r.statusCode, body: b }));
+  }).on('error', reject);
+});
+test('read-path speed: team reads revalidate in the bowler\u2019s browser (ETag, 304) and never in a shared cache', async () => {
+  const sec = await user(), t = await team(sec), tid = t.team.id;
+  for (const path of [T, `${T}/${tid}`]) {
+    const a = await call('GET', path, { token: sec.token });
+    assert.equal(a.status, 200); assert.equal(a.headers.get('cache-control'), 'private, no-cache'); assert.match(a.headers.get('vary') || '', /Authorization/);
+    const et = a.headers.get('etag'); assert.ok(et, 'an ETag is sent');
+    const r = await revalidateGet(path, sec.token, et);
+    assert.equal(r.status, 304, path + ' unchanged answers 304'); assert.equal(r.body.length, 0);
+  }
+  const et = (await call('GET', `${T}/${tid}`, { token: sec.token })).headers.get('etag');
+  assert.equal((await call('POST', `${T}/${tid}/notes`, { token: sec.token, body: { lanes: '5-6', text: 'changed' } })).status, 201);
+  const r = await revalidateGet(`${T}/${tid}`, sec.token, et);
+  assert.equal(r.status, 200, 'a changed team answers with the new body'); assert.ok(JSON.parse(r.body).notes.some(n => n.text === 'changed'));
+  // Other routes keep no-store.
+  assert.equal((await call('GET', '/api/account', { token: sec.token })).headers.get('cache-control'), 'no-store');
 });
