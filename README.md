@@ -73,5 +73,15 @@ RG/Diff tables. Response `status`: `found` (with `source.url`, `source.fetchedAt
 `not-found`, `unsupported`, `blocked`, `busy`; 400 on bad input or an off-list URL. Results are cached in `spec_cache` (30 days found,
 1 day otherwise). **`spec_cache` is global public maker data with no device id**, so `/api/me` has nothing of the user's in it.
 
+## Feedback (`/api/feedback`, `/api/survey`, `/api/usage`, `/api/errors`; no device id, no account)
+Anonymous, first-party, used by the app's Feedback button, post-game survey, and the opt-in usage counts and crash reports (both off by default in the app).
+- `POST /api/feedback` `{type:"bug"|"idea"|"praise", text?, screenshot?:"data:image/jpeg;base64,...", build?:"v82", route?:"/lane", device?:"phone"}` -> `201 {receipt, screenshot}`. 300 kB body cap, 200 KB image cap.
+- `POST /api/survey` `{useful:1-5, note?, build?, device?}` -> `201 {receipt}`
+- `POST /api/usage` `{build?, counts:{"bag.built":2, ...}}` -> `202` (allow-list in `lib/feedback.js` `USAGE_KEYS`)
+- `POST /api/errors` `{kind:"error"|"rejection"|"sw", message, stack?, build?, route?, device?}` -> `202 {fingerprint}`
+- `DELETE /api/feedback` `{receipts:[...]}` -> deletes the bowler's own feedback/survey rows.
+- Owner read (off unless **`FEEDBACK_ADMIN_TOKEN`** (32+ random chars) is set in the Render dashboard; otherwise 404): `GET /api/owner/summary?since=ISO`, `GET /api/owner/feedback?since=ISO&limit=1-500`, `GET /api/owner/feedback/:id/screenshot`, all with `Authorization: Bearer <token>`.
+- Weekly digest: `FEEDBACK_ADMIN_TOKEN=... node scripts/feedback-digest.mjs --days 7 --out digest.md`.
+
 ## Tests
 `BASE=http://localhost:8787 npm test` (node:test; needs a running server + Postgres started with `SESSION_PEPPER=<32+ chars> RL_SIGNUP=1000 EVENT_QUOTA=50 RL_TEAM_CREATE=1000 RL_TEAM_JOIN=1000 RL_TEAM_JOIN_IP=1000`; optional `TEST_DATABASE_URL` (a local DB only) lets the invite-expiry check move an expiry into the past; refuses to run against onrender.com; cleans up its own device ids and accounts).

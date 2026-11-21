@@ -6,6 +6,7 @@ const SF = require('./lib/specfetch');
 const CH = require('./lib/specchain');
 const A = require('./lib/auth');
 const T = require('./lib/teams');
+const FB = require('./lib/feedback');
 
 const PORT = process.env.PORT || 3000;
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -71,7 +72,7 @@ async function initDb() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL
         );
         CREATE INDEX IF NOT EXISTS sessions_user ON sessions (user_id);
-      ` + T.SQL);   // My Team tables (additive, 2026-10-31; lib/teams.js)
+      ` + T.SQL + FB.SQL);   // My Team tables (additive, 2026-10-31; lib/teams.js) + feedback tables (additive, 2026-11-21; lib/feedback.js)
       dbReady = true;
       console.log('database ready');
       return;
@@ -108,6 +109,8 @@ app.use((req, res, next) => {
   next();
 });
 app.use((req, res, next) => { const t0 = Date.now(); res.on('finish', () => { if (req.path !== '/api/health') console.log(JSON.stringify({ m: req.method, p: req.path, s: res.statusCode, ms: Date.now() - t0 })); }); next(); });
+// Feedback (lib/feedback.js): POST /api/feedback may carry a small screenshot, so it is rate-limited and parsed here (<= 300 kB) first.
+app.use('/api/feedback', (req, res, next) => FB.pre(req, res, next, { hit, limited: (r, w) => limited(r, w), express }));
 app.use(express.json({ limit: '20kb' }));
 
 // ---- per-device identity + rate limiting (in-memory; fine for a single free instance)
@@ -115,11 +118,12 @@ const DEVICE_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const buckets = new Map();
 function hit(key, limit, windowMs) {
   const now = Date.now(); let b = buckets.get(key);
-  if (!b || now - b.t0 > windowMs) { b = { t0: now, n: 0 }; buckets.set(key, b); }
+  if (!b || now - b.t0 > windowMs) { b = { t0: now, n: 0, w: windowMs }; buckets.set(key, b); }
   b.n++;
   return b.n <= limit ? 0 : Math.ceil((b.t0 + windowMs - now) / 1000);
 }
-setInterval(() => { const now = Date.now(); for (const [k, b] of buckets) if (now - b.t0 > 120000) buckets.delete(k); }, 60000).unref();
+// 2026-11-21: keep a bucket for its whole window (was 120 s for every bucket, which quietly shortened the hourly limits to ~2-3 minutes).
+setInterval(() => { const now = Date.now(); for (const [k, b] of buckets) if (now - b.t0 > Math.max(120000, b.w || 0)) buckets.delete(k); }, 60000).unref();
 const LIMITS = { ip: +(process.env.RL_IP || 600), device: +(process.env.RL_DEVICE || 120), write: +(process.env.RL_WRITE || 40), lookup: +(process.env.RL_LOOKUP || 30) };
 app.use('/api', (req, res, next) => {
   if (req.path === '/health') return next();
@@ -416,6 +420,8 @@ app.delete('/api/account', needUser, wrap(async (req, res) => {
 }));
 // My Team (community hub): /api/account/teams/* (account CORS allowlist + needUser on every route; see lib/teams.js).
 T.mount(app, { pool, needUser, wrap, hit, limited, bad, body, pepper: () => PEPPER });
+// First-party feedback, survey, opt-in usage counts and crash reports (2026-11-21). Anonymous submit; owner read needs FEEDBACK_ADMIN_TOKEN.
+FB.mount(app, { pool, wrap, hit, limited, bad, body, secret: () => PEPPER || 'arsenal-pro-feedback-receipt-v1' });
 
 // ---- ball spec lookup on the maker's own site (allowlisted hosts only; see lib/specfetch.js). Proposal only: the app
 // shows every field with its source and the user confirms before anything is saved. Missing fields are simply absent.

@@ -25,3 +25,7 @@ services:
       # Origins allowed to call /api/auth/* and /api/account* (comma-separated). Device-code routes stay CORS *.
       - key: CORS_ORIGINS
         value: https://majalen3.github.io
+      # Feedback owner read (GET /api/owner/*, scripts/feedback-digest.mjs). Set a 32+ char random value in the Render dashboard
+      # yourself; leave it unset to keep the read side off (404). Never commit a value.
+      - key: FEEDBACK_ADMIN_TOKEN
+        sync: false
