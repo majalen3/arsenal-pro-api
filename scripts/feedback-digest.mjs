@@ -29,6 +29,34 @@ export function themesOf(texts) {
   return out.filter((t) => t.n).sort((a, b) => b.n - a.n);
 }
 
+// Activation funnel from the opt-in totals (v83 app). usage.on = phones that turned counts on in the window; each first.* is counted
+// once per phone, only after its opt-in. Small numbers: read the trend, not one week.
+export const FUNNEL = [['usage.on', 'Turned on usage counts'], ['first.bag', 'Packed a first bag'], ['first.ball', 'Added a first ball'],
+  ['first.optimize', 'Used Optimize for the first time'], ['first.game', 'Finished a first game']];
+export function funnel(usage) {
+  const n = (k) => ((usage || []).find((u) => u.key === k) || { n: 0 }).n;
+  const base = n('usage.on'), L = ['## Activation funnel (opt-in phones)', ''];
+  if (!base) { L.push('No phone turned on usage counts in this window, so there is no funnel yet. Older opt-ins still add to the totals above.'); return L; }
+  L.push('Each step counts once per phone, only after it opted in. Share = of phones that opted in this window.', '', '| Step | Phones | Share |', '|---|---|---|');
+  for (const [k, label] of FUNNEL) L.push(`| ${label} | ${n(k)} | ${k === 'usage.on' ? '100%' : Math.round((100 * n(k)) / base) + '%'} |`);
+  const extra = [['ball.added', 'Balls added'], ['app.installed', 'Installs'], ['app.shared', 'Share the app taps']].filter(([k]) => n(k));
+  if (extra.length) L.push('', extra.map(([k, l]) => `${l}: ${n(k)}`).join(' · '));
+  return L;
+}
+// Readiness scorecard: the owner's targets from docs/NEXT_PHASE_PLAN.md (app repo). These are targets, not research numbers.
+export function scorecard({ answers = 0, avg = null, er = [], us = [], bugs = 0 } = {}) {
+  const n = (k) => ((us || []).find((u) => u.key === k) || { n: 0 }).n;
+  const row = (sig, now, target, ok) => `| ${sig} | ${now} | ${target} | ${ok == null ? 'not enough data' : ok ? 'on track' : 'not yet'} |`;
+  const repeat = er.filter((e) => (e.builds || []).filter(Boolean).length > 1).length;
+  return ['## Readiness scorecard (owner targets)', '', '| Signal | This window | Target | Status |', '|---|---|---|---|',
+    row('Phones that opted in', n('usage.on'), '10+ outside the owner (cumulative)', n('usage.on') >= 10 ? true : null),
+    row('First bag / opt-ins', n('usage.on') ? Math.round((100 * n('first.bag')) / n('usage.on')) + '%' : '-', 'most', n('usage.on') >= 5 ? n('first.bag') * 2 > n('usage.on') : null),
+    row('Post-game average', avg == null ? '-' : `${avg.toFixed(2)} (${answers})`, '4+ over 10+ answers', answers >= 10 ? avg >= 4 : null),
+    row('Crash clusters seen on more than one build', repeat, '0', er.length ? repeat === 0 : true),
+    row('Bug reports', bugs, 'each answered next week', null),
+    '', 'Not in this digest (check by hand): 4 clean dogfood nights in a row, real-phone smoke, legal placeholders, name.'];
+}
+
 export function digest(summary, list, { now = new Date() } = {}) {
   const fb = (list && list.feedback) || [], notes = (list && list.surveyNotes) || [];
   const byKind = summary.feedbackByKind || {};
@@ -75,6 +103,8 @@ export function digest(summary, list, { now = new Date() } = {}) {
   const us = summary.usage || [];
   if (!us.length) L.push('No opted-in counts this window.', '');
   else { L.push('Totals from phones that turned on anonymous usage counts (off by default). Reports = upload batches, not people.', '', '| Action | Count | Reports |', '|---|---|---|', ...us.map((u) => `| ${u.key} | ${u.n} | ${u.reports} |`), ''); }
+  L.push(...funnel(us), '');
+  L.push(...scorecard({ answers, avg, er, us, bugs: byKind.bug || 0 }), '');
   L.push('## Latest ideas and praise', '');
   const other = fb.filter((f) => f.kind !== 'bug' && f.text).slice(0, 10);
   if (!other.length) L.push('None this window.', '');

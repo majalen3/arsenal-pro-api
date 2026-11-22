@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — 2026-11-22 (branch feedback-funnel, NOT merged or deployed: needs the owner's merge OK and Render deploy OK)
+- Usage allow-list adds the app v83 activation funnel and three totals: `usage.on` (one per opt-in), `first.bag`, `first.ball`, `first.optimize`, `first.game` (0 or 1 per phone), `ball.added`, `app.installed`, `app.shared`. Same storage as before (summed per day/key/build; the request is not kept). No schema change.
+- `POST /api/usage` now answers `{ok, stored, keys}` with the keys it stored, so the v83 app marks only those as sent. Older apps ignore the extra field.
+- Weekly digest (`scripts/feedback-digest.mjs`): new **Activation funnel** table (each step as a share of opt-ins) and a **Readiness scorecard** against the owner's targets in the app repo's `docs/NEXT_PHASE_PLAN.md`. Still read-only; the token is still read from the environment only.
+
 ## Unreleased — 2026-11-21 (branch feedback-api, NOT merged or deployed: needs the owner's merge OK and Render deploy OK)
 - First-party feedback (owner t163u, launch plan week 1). `lib/feedback.js`, additive tables only (`CREATE TABLE/INDEX IF NOT EXISTS`): `fb_feedback`, `fb_shots`, `fb_survey`, `fb_usage`, `fb_errors`. No existing table, column or row is touched.
 - Anonymous submit, no device id, account, email, IP or user agent stored: `POST /api/feedback` (bug/idea/praise, text <= 1000, optional screenshot <= 200 KB JPEG/PNG/WebP with byte-signature check, 300 kB body parsed only after the rate limit), `POST /api/survey` (1-5 + note <= 140), `POST /api/usage` (allow-listed counters, summed per day/key/build; the request is not kept), `POST /api/errors` (scrubbed again server-side, aggregated per day/fingerprint, 200 new clusters/day cap). Free text: emails, links, phone numbers replaced before storage.
