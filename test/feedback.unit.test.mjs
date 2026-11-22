@@ -75,3 +75,17 @@ test('weekly digest: counts, themes, top bugs, survey, crash clusters as Markdow
   const th = themesOf(['Optimize is slow on the lane', 'bag pick was great', 'Shake up my bag']);
   assert.equal(th[0].name, 'Bag building'); assert.equal(th[0].n, 2);
 });
+
+test('v83: funnel keys are accepted; digest shows the funnel and the readiness scorecard', async () => {
+  const { cleanCounts } = require('../lib/feedback.js');
+  assert.deepEqual(cleanCounts({ 'usage.on': 2, 'first.bag': 1, 'first.ball': 1, 'first.optimize': 1, 'first.game': 1, 'ball.added': 4, 'app.installed': 1, 'app.shared': 1, 'evil': 3 }),
+    { 'usage.on': 2, 'first.bag': 1, 'first.ball': 1, 'first.optimize': 1, 'first.game': 1, 'ball.added': 4, 'app.installed': 1, 'app.shared': 1 });
+  const { digest, funnel, scorecard } = await import('../scripts/feedback-digest.mjs');
+  assert.match(funnel([]).join('\n'), /no funnel yet/);
+  const f = funnel([{ key: 'usage.on', n: 4 }, { key: 'first.bag', n: 3 }, { key: 'first.game', n: 1 }, { key: 'ball.added', n: 5 }]).join('\n');
+  assert.match(f, /\| Packed a first bag \| 3 \| 75% \|/); assert.match(f, /\| Finished a first game \| 1 \| 25% \|/); assert.match(f, /Balls added: 5/);
+  const sc = scorecard({ answers: 12, avg: 4.25, er: [{ builds: ['v82', 'v83'] }], us: [{ key: 'usage.on', n: 12 }, { key: 'first.bag', n: 10 }], bugs: 2 }).join('\n');
+  assert.match(sc, /Phones that opted in \| 12 .* on track/); assert.match(sc, /Post-game average \| 4\.25 \(12\) .* on track/); assert.match(sc, /more than one build \| 1 \| 0 \| not yet/);
+  const md = digest({ since: '2026-11-15T00:00:00Z', usage: [{ key: 'usage.on', n: 1, reports: 1 }] }, { feedback: [] }, { now: new Date('2026-11-22T00:00:00Z') });
+  assert.match(md, /## Activation funnel/); assert.match(md, /## Readiness scorecard/);
+});

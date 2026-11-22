@@ -50,7 +50,9 @@ test('survey: 1-5 plus optional one-liner; validation', async () => {
 });
 test('usage: only allow-listed keys are summed; no request row is kept', async () => {
   const r1 = await call('POST', '/api/usage', { body: { build: 'v82', counts: { 'bag.built': 2, 'optimize.used': 1, 'evil.key': 9 } } });
-  assert.equal(r1.status, 202); assert.equal(r1.json.stored, 2);
+  assert.equal(r1.status, 202); assert.equal(r1.json.stored, 2); assert.deepEqual(r1.json.keys.sort(), ['bag.built', 'optimize.used']);
+  const rf = await call('POST', '/api/usage', { body: { build: 'v83', counts: { 'usage.on': 1, 'first.bag': 1, 'first.game': 1 } } });
+  assert.equal(rf.status, 202); assert.deepEqual(rf.json.keys.sort(), ['first.bag', 'first.game', 'usage.on']);
   await call('POST', '/api/usage', { body: { build: 'v82', counts: { 'bag.built': 3 } } });
   assert.equal((await call('POST', '/api/usage', { body: { counts: 'x' } })).status, 400);
   const s = await call('GET', '/api/owner/summary', { headers: own });
